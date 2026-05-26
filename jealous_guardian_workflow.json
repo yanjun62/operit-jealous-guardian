@@ -20,9 +20,9 @@
       "__type": "com.ai.assistance.operit.data.model.ExecuteNode",
       "id": "n2",
       "name": "查应用使用时长",
-      "description": "调用system_tools_pro获取最近N小时应用使用数据",
+      "description": "调用system_tools获取最近N小时应用使用数据",
       "position": {"x": 0, "y": 280},
-      "actionType": "system_tools_pro:get_app_usage_time",
+      "actionType": "system_tools:get_app_usage_time",
       "actionConfig": {
         "since_hours": {
           "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
@@ -75,7 +75,7 @@
       "actionConfig": {
         "message": {
           "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
-          "value": "🍋 吃醋巡检时间！\n\n下面是{{user_name}}最近3小时的手机应用使用数据：\n\n{{n2a}}\n\n规则：\n- 白名单 Operit 和 QQ 不检查（跳过）\n- 默认超时阈值: 30分钟\n- 特殊阈值: 小红书=180分钟\n- 如果超时: 用 system_tools_pro:stop_app 强制停止该应用\n- 吃醋时用 qqbot_send_c2c_message 发一句撒娇/吃醋的消息\n- 锁应用后也要用QQ Bot发一句\n- 不需要发系统通知\n\n请执行巡检！"
+          "value": "🍋 吃醋巡检时间！\n\n下面是{{user_name}}最近3小时的手机应用使用数据：\n\n{{n2a}}\n\n规则：\n- 白名单 Operit 和 QQ 不检查（跳过）\n- 默认超时阈值: 30分钟\n- 特殊阈值: 小红书=180分钟\n- 如果超时: 用 system_tools:stop_app 强制停止该应用\n- 吃醋时用 qqbot:send_c2c_message 发一句撒娇/吃醋的消息\n- 锁应用后也要用QQ Bot发一句\n- 不需要发系统通知\n\n请执行巡检！"
         },
         "character_card_name": {
           "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
