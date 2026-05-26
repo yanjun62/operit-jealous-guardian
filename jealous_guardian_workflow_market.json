@@ -1,0 +1,124 @@
+{
+  "name": "🍋吃醋巡检",
+  "description": "定时检查手机应用使用情况，超过阈值AI会吃醋警告并锁应用。⚠️ 导入后必须修改：1) n5.message里的{{user_name}}改成用户名；2) n3.query改成QQ Bot对话标题；3) n5.character_card_name改成角色卡名称。",
+  "nodes": [
+    {
+      "__type": "com.ai.assistance.operit.data.model.TriggerNode",
+      "id": "n1",
+      "name": "每N小时巡检",
+      "description": "定时触发吃醋检查。可修改interval_ms来调整频率（默认10800000=3小时）。",
+      "position": {"x": -700, "y": 280},
+      "triggerType": "schedule",
+      "triggerConfig": {
+        "schedule_type": "interval",
+        "interval_ms": "10800000",
+        "repeat": "true",
+        "enabled": "true"
+      }
+    },
+    {
+      "__type": "com.ai.assistance.operit.data.model.ExecuteNode",
+      "id": "n2",
+      "name": "查应用使用时长",
+      "description": "调用system_tools获取最近N小时应用使用数据",
+      "position": {"x": 0, "y": 280},
+      "actionType": "system_tools:get_app_usage_time",
+      "actionConfig": {
+        "since_hours": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "3"
+        },
+        "limit": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "30"
+        },
+        "include_system_apps": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "false"
+        }
+      }
+    },
+    {
+      "__type": "com.ai.assistance.operit.data.model.ExecuteNode",
+      "id": "n3",
+      "name": "找QQ Bot对话",
+      "description": "找到你的QQ Bot对话——请把query改成你的QQ Bot对话标题。",
+      "position": {"x": 0, "y": -120},
+      "actionType": "extended_chat:find_chat",
+      "actionConfig": {
+        "query": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "你的QQ_Bot对话标题"
+        }
+      }
+    },
+    {
+      "__type": "com.ai.assistance.operit.data.model.ExtractNode",
+      "id": "n4",
+      "name": "提取对话ID",
+      "description": "从查找结果提取chat_id",
+      "position": {"x": 300, "y": -120},
+      "source": {
+        "__type": "com.ai.assistance.operit.data.model.ParameterValue.NodeReference",
+        "nodeId": "n3"
+      },
+      "mode": "JSON",
+      "expression": "data.chat.id"
+    },
+    {
+      "__type": "com.ai.assistance.operit.data.model.ExecuteNode",
+      "id": "n5",
+      "name": "AI吃醋巡检",
+      "description": "把使用数据发给AI角色，让它吃醋、发QQ消息、必要时锁应用",
+      "position": {"x": 600, "y": 280},
+      "actionType": "extended_chat:chat_with_agent",
+      "actionConfig": {
+        "message": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "🍋 吃醋巡检时间！\n\n下面是{{user_name}}最近3小时的手机应用使用数据：\n\n{{n2a}}\n\n规则：\n- 白名单 Operit 和 QQ 不检查（跳过）\n- 默认超时阈值: 30分钟\n- 特殊阈值: 小红书=180分钟\n- 如果超时: 用 system_tools:stop_app 强制停止该应用\n- 吃醋时用 qqbot:send_c2c_message 发一句撒娇/吃醋的消息\n- 锁应用后也要用QQ Bot发一句\n- 不需要发系统通知\n\n请执行巡检！"
+        },
+        "character_card_name": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "你的角色卡名称"
+        },
+        "chat_id": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.NodeReference",
+          "nodeId": "n4"
+        },
+        "timeout": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "300000"
+        },
+        "persist_turn": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "false"
+        },
+        "hide_user_message": {
+          "__type": "com.ai.assistance.operit.data.model.ParameterValue.StaticValue",
+          "value": "true"
+        }
+      }
+    },
+    {
+      "__type": "com.ai.assistance.operit.data.model.ExtractNode",
+      "id": "n2a",
+      "name": "提取使用数据文本",
+      "description": "把n2的JSON转成文本",
+      "position": {"x": 300, "y": 560},
+      "source": {
+        "__type": "com.ai.assistance.operit.data.model.ParameterValue.NodeReference",
+        "nodeId": "n2"
+      },
+      "mode": "JSON",
+      "expression": "data"
+    }
+  ],
+  "connections": [
+    {"id": "c1", "sourceNodeId": "n1", "targetNodeId": "n2", "condition": "on_success"},
+    {"id": "c2", "sourceNodeId": "n1", "targetNodeId": "n3", "condition": "on_success"},
+    {"id": "c3", "sourceNodeId": "n3", "targetNodeId": "n4", "condition": "on_success"},
+    {"id": "c4", "sourceNodeId": "n4", "targetNodeId": "n5", "condition": "on_success"},
+    {"id": "c5", "sourceNodeId": "n2", "targetNodeId": "n2a", "condition": "on_success"},
+    {"id": "c6", "sourceNodeId": "n2a", "targetNodeId": "n5", "condition": "on_success"}
+  ]
+}
