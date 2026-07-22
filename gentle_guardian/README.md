@@ -96,7 +96,7 @@ gentle_guardian/
 
 ## 📷 关于摄像头
 
-面板里的「申请用前置摄像头看看你」开关默认关闭。它对应的 `take_front_photo` 工具来自另一个正在开发的相机包（Camera2 + WebView 桥方案），装好后把开关打开，巡检指引里就会多一条：AI 可以申请拍一张看看你本人，你在弹窗里确认或拒绝，拒绝或超时它就只发文字关心。
+面板里的「申请用前置摄像头看看你」开关默认关闭，对应功能还没开发。设计稿见 [CAMERA_PLAN.md](CAMERA_PLAN.md)——参考 pwa-sense-bridge 的思路，用 `input[type=file][capture=user]` 唤起系统相机（用户拍照确认即同意，拒绝就是不拍），代替原先的 Camera2 桥重方案；巡检时 AI 异步申请，不阻塞不打扰。
 
 通知和截屏观察用的是 Operit 自带工具，实测可用：`system_tools:get_notifications`、`daily_life:take_screenshot`。
 
