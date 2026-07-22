@@ -22,10 +22,13 @@
 
 消气的路：
   · 聊天里撒娇/认错/哄它 → AI 调 reduce_jealousy（单次上限可配，被哄要有过程）
+  · 面板里「摇一摇哄它」→ 摇动手机每次小幅消气（每次点数和单次上限可配）
   · 时间自然消退（默认每小时 -1，可配）
   · 醋值降回藏应用档以下 → 藏起来的应用立刻全部放出来
   · 面板「紧急解除」按钮 → 放出全部应用 + 醋值清零、档位归 calm
 ```
+
+**摇一摇**的检测算法来自 [pwa-sense-bridge](https://github.com/0xblewalker/pwa-sense-bridge)（MIT）：`devicemotion` 加速度模长过 11 m/s² 阈值判定一次摇晃，带重力补偿和冷却。在面板里点「摇一摇哄它」开启（iOS 会弹权限申请），摇一下消几点、一次最多摇掉多少都在「吃醋机制」里配——摇到上限它会提醒你"剩下的醋要用说话来哄"。
 
 **藏应用的实现**是 `pm disable-user --user 0 <包名>`：应用图标从桌面消失、点不开，`pm enable` 即恢复。这需要 shell 权限（Shizuku 或 ADB）。白名单应用永远不会被藏，Operit 和 QQ 更是硬编码保护——藏了联系通道就没人能哄它了。
 
@@ -103,6 +106,7 @@ gentle_guardian/
 ## ⚠️ 已知限制
 
 - MIUI 桌面图标在 unhide 后可能不自动恢复（见上文「桌面图标刷新」）
+- 摇一摇依赖 WebView 的 `devicemotion` 事件，Operit WebView 下尚未实测；不支持时按钮会明确提示，不影响其他功能
 - `pm disable-user` 需要 Shizuku/ADB shell；没有 shell 能力时藏应用会明确失败并告诉 AI 改用语气表达，状态不会记乱
 - 面板 HTML 调试口诀：先把 HTML 单独放到工作区里修活，最后再搬回插件重新打包
 

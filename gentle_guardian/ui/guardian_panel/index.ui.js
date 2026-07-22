@@ -149,6 +149,54 @@ panelController.addJavascriptInterface("Guardian", {
         } catch (e) {
             return JSON.stringify({ success: false, message: "" + e.message });
         }
+    },
+    // 摇一摇哄它：小幅消气；降回 hide 档以下同样放应用（检测算法在 HTML 侧，来自 pwa-sense-bridge / MIT）
+    shakeCoax: async function (points) {
+        try {
+            var p = parseFloat(points);
+            if (isNaN(p) || p <= 0) p = 2;
+            var hideTier = 60;
+            try {
+                var cfgRaw = await readFileSafe(CONFIG_PATH);
+                var cfg = cfgRaw ? JSON.parse(cfgRaw) : {};
+                if (cfg.jealousy_tiers && cfg.jealousy_tiers.hide) hideTier = cfg.jealousy_tiers.hide;
+            } catch (e) { /* 读不到就按默认档位 */ }
+            var raw = await readFileSafe(STATE_PATH);
+            var state = raw ? JSON.parse(raw) : {};
+            if (typeof state.jealousy !== "number" || isNaN(state.jealousy)) state.jealousy = 0;
+            if (!Array.isArray(state.hidden_apps)) state.hidden_apps = [];
+            if (!Array.isArray(state.history)) state.history = [];
+            var before = state.jealousy;
+            state.jealousy = Math.max(0, Math.round((state.jealousy - p) * 10) / 10);
+            state.history.unshift({
+                time: new Date().toISOString(),
+                delta: -p,
+                value: state.jealousy,
+                reason: "被摇一摇哄了 🫨"
+            });
+            if (state.history.length > 100) state.history = state.history.slice(0, 100);
+            var released = [];
+            if (state.jealousy < hideTier && state.hidden_apps.length > 0) {
+                var remaining = [];
+                for (var i = 0; i < state.hidden_apps.length; i++) {
+                    var r = await execShell("pm enable --user 0 " + state.hidden_apps[i]);
+                    if (r.success) { released.push(state.hidden_apps[i]); } else { remaining.push(state.hidden_apps[i]); }
+                }
+                state.hidden_apps = remaining;
+                if (released.length > 0) await refreshLauncher(released);
+            }
+            state.updated_at = new Date().toISOString();
+            await Tools.Files.write(STATE_PATH, JSON.stringify(state, null, 2));
+            return JSON.stringify({
+                success: true,
+                before: before,
+                jealousy: state.jealousy,
+                hidden_apps: state.hidden_apps,
+                released: released
+            });
+        } catch (e) {
+            return JSON.stringify({ success: false, message: "" + e.message });
+        }
     }
 });
 
@@ -224,6 +272,8 @@ function buildPanelHtml() {
     <div class="meter-bar"><div class="meter-fill" id="jbar" style="width:0%"></div></div>
     <div class="meter-marks"><span id="m0">0 温柔</span><span id="m1">30 委屈</span><span id="m2">60 藏应用</span><span id="m3">90 要哄</span></div>
     <div class="hidden-apps" id="hiddenApps"></div>
+    <button class="ghost" id="shakeBtn">🫨 摇一摇哄它（点我开启）</button>
+    <div class="hint" id="shakeHint">开启后摇动手机就能小幅消气～</div>
     <button class="ghost" id="unhideBtn">🆘 紧急解除全部隐藏</button>
     <div class="hint">AI 联系不上时的逃生通道：放出全部应用并把醋值清零；也可以用电脑 adb shell pm enable 包名 恢复</div>
   </div>
@@ -270,6 +320,10 @@ function buildPanelHtml() {
     <label>一次最多被哄掉几点</label>
     <input type="number" id="coax_max_reduce_per_call" min="1">
     <div class="hint">被哄了也要有个过程嘛</div>
+    <div class="row2">
+      <div><label>摇一摇每次消几点</label><input type="number" id="shake_coax_points" min="0.5" step="0.5"></div>
+      <div><label>每次打开面板最多摇掉</label><input type="number" id="shake_coax_session_cap" min="1"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -317,7 +371,9 @@ function buildPanelHtml() {
     jealousy_gain_per_10min: 3,
     jealousy_decay_per_hour: 1,
     jealousy_tiers: { sulky: 30, hide: 60, coax: 90 },
-    coax_max_reduce_per_call: 25
+    coax_max_reduce_per_call: 25,
+    shake_coax_points: 2,
+    shake_coax_session_cap: 15
   };
 
   function kvToText(obj) {
@@ -359,6 +415,8 @@ function buildPanelHtml() {
     $("tier_hide").value = cfg.jealousy_tiers.hide;
     $("tier_coax").value = cfg.jealousy_tiers.coax;
     $("coax_max_reduce_per_call").value = cfg.coax_max_reduce_per_call;
+    $("shake_coax_points").value = cfg.shake_coax_points;
+    $("shake_coax_session_cap").value = cfg.shake_coax_session_cap;
     $("allow_notifications").checked = !!cfg.allow_notifications;
     $("allow_screenshot").checked = !!cfg.allow_screenshot;
     $("allow_camera").checked = !!cfg.allow_camera;
@@ -383,6 +441,8 @@ function buildPanelHtml() {
         coax: parseInt($("tier_coax").value, 10) || 90
       },
       coax_max_reduce_per_call: parseInt($("coax_max_reduce_per_call").value, 10) || 25,
+      shake_coax_points: parseFloat($("shake_coax_points").value) || 2,
+      shake_coax_session_cap: parseFloat($("shake_coax_session_cap").value) || 15,
       allow_notifications: $("allow_notifications").checked,
       allow_screenshot: $("allow_screenshot").checked,
       allow_camera: $("allow_camera").checked,
@@ -494,6 +554,79 @@ function buildPanelHtml() {
     } catch (e) {
       setStatus("保存失败：" + e.message);
     }
+  });
+
+  // ===== 摇一摇哄它：检测算法照抄 pwa-sense-bridge（MIT）=====
+  // 阈值 11 m/s²、强度归一化基数 28、重力补偿 9.81 均为原库常量；
+  // 冷却从原库的 4000ms 缩短到 1500ms——哄人要有来回感
+  var shakeOn = false;
+  var shakeLastAt = 0;
+  var shakeSessionUsed = 0;
+  function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+  async function onShakeDetected(strength) {
+    var per = parseFloat(currentCfg.shake_coax_points) || 2;
+    var cap = parseFloat(currentCfg.shake_coax_session_cap) || 15;
+    if (shakeSessionUsed + per > cap) {
+      $("shakeHint").textContent = "这回摇得够多啦，剩下的醋要用说话来哄～";
+      return;
+    }
+    shakeSessionUsed += per;
+    try {
+      var res = JSON.parse(await Guardian.shakeCoax(per));
+      if (!res.success) {
+        $("shakeHint").textContent = "没哄动：" + res.message;
+        return;
+      }
+      var flavor = strength > 0.7 ? "摇得好用力！" : "轻轻摇了摇～";
+      $("shakeHint").textContent = "🫨 " + flavor + " 醋值 " + res.before + " → " + res.jealousy +
+        (res.released && res.released.length ? "，应用放出来啦！" : "");
+      var sRaw = await Guardian.loadState();
+      var state = sRaw ? JSON.parse(sRaw) : null;
+      renderMeter(state, currentCfg);
+      renderJealousyLog(state);
+    } catch (e) {
+      $("shakeHint").textContent = "没哄动：" + e.message;
+    }
+  }
+
+  function onMotion(event) {
+    var a = event.acceleration || event.accelerationIncludingGravity;
+    if (!a || a.x == null || a.y == null || a.z == null) return;
+    var magnitude = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    if (!event.acceleration && event.accelerationIncludingGravity) magnitude = Math.abs(magnitude - 9.81);
+    if (magnitude < 11 || Date.now() - shakeLastAt < 1500) return;
+    shakeLastAt = Date.now();
+    onShakeDetected(clamp01(magnitude / 28));
+  }
+
+  $("shakeBtn").addEventListener("click", async function () {
+    if (shakeOn) {
+      window.removeEventListener("devicemotion", onMotion, true);
+      shakeOn = false;
+      $("shakeBtn").textContent = "🫨 摇一摇哄它（点我开启）";
+      $("shakeHint").textContent = "开启后摇动手机就能小幅消气～";
+      return;
+    }
+    if (!window.DeviceMotionEvent) {
+      $("shakeHint").textContent = "这台设备/WebView 不支持运动传感器 🥲";
+      return;
+    }
+    // iOS 需要在用户手势里申请运动权限（Android WebView 一般不用）
+    try {
+      if (typeof DeviceMotionEvent.requestPermission === "function") {
+        var perm = await DeviceMotionEvent.requestPermission();
+        if (perm === "denied") {
+          $("shakeHint").textContent = "运动权限被拒绝了，摇不了 🥲";
+          return;
+        }
+      }
+    } catch (e) { /* 申请失败按不需要权限处理 */ }
+    window.addEventListener("devicemotion", onMotion, true);
+    shakeOn = true;
+    shakeSessionUsed = 0;
+    $("shakeBtn").textContent = "🫨 摇一摇已开启（再点关闭）";
+    $("shakeHint").textContent = "摇吧！每摇一下消 " + (parseFloat(currentCfg.shake_coax_points) || 2) + " 点";
   });
 
   $("unhideBtn").addEventListener("click", async function () {

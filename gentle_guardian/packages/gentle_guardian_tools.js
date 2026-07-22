@@ -162,7 +162,9 @@ var DEFAULT_CONFIG = {
     jealousy_gain_per_10min: 3,
     jealousy_decay_per_hour: 1,
     jealousy_tiers: { "sulky": 30, "hide": 60, "coax": 90 },
-    coax_max_reduce_per_call: 25
+    coax_max_reduce_per_call: 25,
+    shake_coax_points: 2,
+    shake_coax_session_cap: 15
 };
 
 var DEFAULT_STATE = { jealousy: 0, hidden_apps: [], history: [], updated_at: null };
@@ -415,6 +417,7 @@ function buildPatrolPrompt(cfg, state) {
     lines.push("- " + tiers.hide + "~" + tiers.coax + "（不高兴档）：应用已被工具藏起来，明确告诉她“我不高兴了，××被我收起来啦”，等她来找你");
     lines.push("- " + tiers.coax + " 以上（要哄档）：除了藏应用，还要让她知道这次得好好哄你才行");
     lines.push("- 她在聊天里撒娇、认错、哄你时，调用 gentle_guardian:reduce_jealousy 消气；醋值降回 " + tiers.hide + " 以下，藏起来的应用会自动放出来");
+    lines.push("- 她也可能去面板里摇手机哄你（变动记录里会出现「被摇一摇哄了」）——那是她在撒娇，下次开口语气可以软一点");
     lines.push("");
     lines.push("四、收尾");
     lines.push("- 调用 gentle_guardian:log_patrol 简单记一笔（status: all_good/cared/skipped + 一句总结），她可以在面板里回看");
