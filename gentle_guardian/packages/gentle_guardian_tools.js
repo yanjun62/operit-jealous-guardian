@@ -7,8 +7,8 @@ METADATA
         "en": "Gentle Guardian"
     },
     "description": {
-        "zh": "温柔巡检的配置与记录工具。配置在侧边栏面板里改，这里的工具负责在巡检时读配置、生成指引、记录巡检结果。",
-        "en": "Config and logging tools for gentle patrols. Settings are edited in the sidebar panel; these tools read config at patrol time, build the guidance prompt, and log results."
+        "zh": "温柔巡检 + 吃醋状态机。巡检时累加吃醋值，分档改变语气，醋意大了会把应用藏起来；聊天里被哄了会消气并放应用出来。配置在侧边栏面板改。",
+        "en": "Gentle patrols with a dynamic jealousy state machine: overtime apps add jealousy, tiers change tone, high jealousy hides apps; coaxing in chat reduces it and releases them."
     },
     "enabledByDefault": true,
     "category": "COMPANION",
@@ -16,8 +16,8 @@ METADATA
         {
             "name": "get_patrol_settings",
             "description": {
-                "zh": "读取温柔巡检配置，返回 QQ 对话标题、角色卡名和本次巡检的完整指引文本。工作流的第一个执行节点调用它。",
-                "en": "Read gentle patrol config. Returns chat query, character card name, and the full guidance prompt. Called by the workflow's first execute node."
+                "zh": "读取温柔巡检配置和当前吃醋状态，返回 QQ 对话标题、角色卡名和本次巡检的完整指引文本。工作流的第一个执行节点调用它。",
+                "en": "Read patrol config plus current jealousy state. Returns chat query, character card name, and the guidance prompt. Called by the workflow's first execute node."
             },
             "parameters": []
         },
@@ -36,6 +36,62 @@ METADATA
                     },
                     "type": "string",
                     "required": true
+                }
+            ]
+        },
+        {
+            "name": "get_jealousy_state",
+            "description": {
+                "zh": "查看自己现在的吃醋程度：醋值、档位（calm温柔/sulky小委屈/hide不高兴/coax要哄）、被藏起来的应用、最近的变动。回复用户之前想确认自己心情时随时可以调。",
+                "en": "Check current jealousy: value, tier (calm/sulky/hide/coax), hidden apps, recent changes. Call anytime before replying to know your own mood."
+            },
+            "parameters": []
+        },
+        {
+            "name": "add_jealousy",
+            "description": {
+                "zh": "巡检时对每个超阈值的应用调用一次，累加吃醋值（按面板配置的权重）。醋值到了 hide 档会自动把该应用藏起来（pm disable-user），返回里会告诉你新档位、该用的语气和实际执行了什么。白名单应用会被拒绝。",
+                "en": "Call once per over-threshold app during patrol. Adds weighted jealousy; at hide tier the app is auto-hidden via pm disable-user. Returns new tier, tone guidance, and actions taken."
+            },
+            "parameters": [
+                {
+                    "name": "app",
+                    "description": { "zh": "应用包名，如 com.xingin.xhs", "en": "Package name" },
+                    "type": "string",
+                    "required": true
+                },
+                {
+                    "name": "minutes",
+                    "description": { "zh": "超出阈值的分钟数（不是总使用时长）", "en": "Minutes OVER the threshold (not total usage)" },
+                    "type": "string",
+                    "required": true
+                },
+                {
+                    "name": "reason",
+                    "description": { "zh": "一句话记录为什么吃醋", "en": "One-line reason" },
+                    "type": "string",
+                    "required": false
+                }
+            ]
+        },
+        {
+            "name": "reduce_jealousy",
+            "description": {
+                "zh": "聊天中检测到用户在撒娇、认错、哄你时调用，消一点醋。降到 hide 档以下会立刻把藏起来的应用全部放出来。一次别降太多——被哄了也要有个过程，单次上限在面板里配。",
+                "en": "Call when the user is coaxing, apologizing, or being sweet in chat. Dropping below the hide tier immediately releases all hidden apps. Single-call reduction is capped."
+            },
+            "parameters": [
+                {
+                    "name": "amount",
+                    "description": { "zh": "消多少醋（会被单次上限截断）", "en": "Amount to reduce (capped per call)" },
+                    "type": "string",
+                    "required": true
+                },
+                {
+                    "name": "reason",
+                    "description": { "zh": "记录一下是被什么哄到的", "en": "What coaxed you" },
+                    "type": "string",
+                    "required": false
                 }
             ]
         },
@@ -70,10 +126,14 @@ METADATA
 }
 */
 
-// ============ 路径常量：全插件只定义这一次（读写必须走同一常量） ============
+// ============ 路径常量：全插件只定义这一次（读写必须走同一常量，面板侧同名同值） ============
 var BASE_DIR = "/sdcard/Download/Operit/plugins/gentle_guardian/";
 var CONFIG_PATH = BASE_DIR + "config.json";
 var LOG_PATH = BASE_DIR + "patrol_log.json";
+var STATE_PATH = BASE_DIR + "jealousy_state.json";
+
+// 通讯生命线：无论白名单怎么配，这两个永远不许 hide（藏了 QQ 就没人能哄它了）
+var PROTECTED_APPS = ["com.ai.assistance.operit", "com.tencent.mobileqq"];
 
 // ============ 默认配置：文件缺失/损坏时的兜底 ============
 var DEFAULT_CONFIG = {
@@ -90,13 +150,28 @@ var DEFAULT_CONFIG = {
     allow_screenshot: true,
     allow_camera: false,
     max_peeks_per_patrol: 1,
-    allow_lock: false,
     care_phrases: [
         "在{app}上待了{minutes}分钟啦，眼睛累不累？休息一下下嘛 ☕",
         "看到你刷了{minutes}分钟{app}～不催你，就是想让你知道我在想你 🌸",
         "记得抬头看看远处哦，{app}不会跑掉的，我也不会 💕",
         "忙什么呢？要不要来跟我说说话～"
-    ]
+    ],
+    jealousy_weights: {
+        "com.xingin.xhs": 1.5
+    },
+    jealousy_gain_per_10min: 3,
+    jealousy_decay_per_hour: 1,
+    jealousy_tiers: { "sulky": 30, "hide": 60, "coax": 90 },
+    coax_max_reduce_per_call: 25
+};
+
+var DEFAULT_STATE = { jealousy: 0, hidden_apps: [], history: [], updated_at: null };
+
+var TIER_INFO = {
+    calm: { label: "温柔", tone: "现在心情不错，正常温柔提醒就好" },
+    sulky: { label: "小委屈", tone: "带一点小委屈的语气，欲言又止那种，但不要指责" },
+    hide: { label: "不高兴", tone: "明确说“我不高兴了”，告诉她应用被你藏起来了，等她来找你" },
+    coax: { label: "要哄", tone: "醋意很浓：应用藏着，而且需要她主动来哄你才肯消气，消气前语气可以别扭一点" }
 };
 
 // ============ 文件读写helper（Tools.Files 返回结构可能是字符串或 {content} 对象，两种都兼容） ============
@@ -118,12 +193,13 @@ async function writeJsonFile(path, obj) {
 function mergeConfig(base, patch) {
     var out = {};
     var k;
+    var deepKeys = { special_thresholds: 1, jealousy_weights: 1, jealousy_tiers: 1 };
     for (k in base) out[k] = base[k];
     for (k in patch) {
-        if (k === "special_thresholds" && patch[k] && typeof patch[k] === "object") {
+        if (deepKeys[k] && patch[k] && typeof patch[k] === "object") {
             out[k] = {};
             var t;
-            for (t in base.special_thresholds) out[k][t] = base.special_thresholds[t];
+            for (t in base[k]) out[k][t] = base[k][t];
             for (t in patch[k]) out[k][t] = patch[k][t];
         } else {
             out[k] = patch[k];
@@ -138,13 +214,133 @@ async function loadConfig() {
     return mergeConfig(DEFAULT_CONFIG, saved);
 }
 
+// ============ shell 执行：hide/unhide 靠它（需要 Shizuku/ADB 级别的 shell 权限） ============
+// ⚠️ 装机时对照 SandboxPackage_DEV 确认真实的 shell API 名，下面按常见命名逐个尝试
+async function execShell(cmd) {
+    var candidates = [];
+    if (typeof Tools !== "undefined") {
+        if (Tools.System && typeof Tools.System.shell === "function") {
+            candidates.push(function () { return Tools.System.shell(cmd); });
+        }
+        if (Tools.System && typeof Tools.System.exec === "function") {
+            candidates.push(function () { return Tools.System.exec(cmd); });
+        }
+        if (Tools.Shell && typeof Tools.Shell.exec === "function") {
+            candidates.push(function () { return Tools.Shell.exec(cmd); });
+        }
+        if (Tools.System && typeof Tools.System.terminal === "function") {
+            candidates.push(function () { return Tools.System.terminal(cmd); });
+        }
+    }
+    if (candidates.length === 0) {
+        return { success: false, output: "", message: "没有可用的 shell 执行能力（需要 Shizuku/ADB）" };
+    }
+    var lastErr = "";
+    for (var i = 0; i < candidates.length; i++) {
+        try {
+            var r = await candidates[i]();
+            var out = typeof r === "string" ? r : JSON.stringify(r);
+            return { success: true, output: out };
+        } catch (e) {
+            lastErr = "" + (e && e.message ? e.message : e);
+        }
+    }
+    return { success: false, output: "", message: "shell 执行失败：" + lastErr };
+}
+
+async function hideApp(pkg) {
+    return await execShell("pm disable-user --user 0 " + pkg);
+}
+
+async function unhideApp(pkg) {
+    return await execShell("pm enable --user 0 " + pkg);
+}
+
+// ============ 吃醋状态机 ============
+function tierOf(value, tiers) {
+    if (value >= tiers.coax) return "coax";
+    if (value >= tiers.hide) return "hide";
+    if (value >= tiers.sulky) return "sulky";
+    return "calm";
+}
+
+function pushHistory(state, entry) {
+    entry.time = new Date().toISOString();
+    state.history.unshift(entry);
+    if (state.history.length > 100) state.history = state.history.slice(0, 100);
+}
+
+// 读状态并做懒消退：距上次更新每过1小时消退 decay 点（可配），时间会慢慢治愈醋意
+async function loadState(cfg) {
+    var state = await readJsonFile(STATE_PATH, null) || DEFAULT_STATE;
+    if (!Array.isArray(state.hidden_apps)) state.hidden_apps = [];
+    if (!Array.isArray(state.history)) state.history = [];
+    if (typeof state.jealousy !== "number" || isNaN(state.jealousy)) state.jealousy = 0;
+    if (state.updated_at && cfg.jealousy_decay_per_hour > 0) {
+        var hours = (Date.now() - new Date(state.updated_at).getTime()) / 3600000;
+        if (hours > 0) {
+            var decayed = Math.max(0, state.jealousy - hours * cfg.jealousy_decay_per_hour);
+            if (decayed !== state.jealousy) state.jealousy = Math.round(decayed * 10) / 10;
+        }
+    }
+    return state;
+}
+
+async function saveState(state) {
+    state.updated_at = new Date().toISOString();
+    await writeJsonFile(STATE_PATH, state);
+}
+
+// 醋值低于 hide 档时，把藏起来的应用全部放出来。返回动作描述列表。
+async function maybeReleaseApps(state, cfg) {
+    var actions = [];
+    if (state.hidden_apps.length === 0) return actions;
+    if (state.jealousy >= cfg.jealousy_tiers.hide) return actions;
+    var remaining = [];
+    for (var i = 0; i < state.hidden_apps.length; i++) {
+        var pkg = state.hidden_apps[i];
+        var r = await unhideApp(pkg);
+        if (r.success) {
+            actions.push("已放出 " + pkg);
+        } else {
+            remaining.push(pkg);
+            actions.push("放出 " + pkg + " 失败：" + (r.message || r.output));
+        }
+    }
+    state.hidden_apps = remaining;
+    if (actions.length > 0) {
+        pushHistory(state, { delta: 0, value: state.jealousy, reason: "醋消了，应用解禁", detail: actions.join("；") });
+    }
+    return actions;
+}
+
+function stateSummary(state, cfg) {
+    var tier = tierOf(state.jealousy, cfg.jealousy_tiers);
+    return {
+        jealousy: Math.round(state.jealousy * 10) / 10,
+        tier: tier,
+        tier_label: TIER_INFO[tier].label,
+        tone: TIER_INFO[tier].tone,
+        hidden_apps: state.hidden_apps.slice(),
+        recent_history: state.history.slice(0, 10)
+    };
+}
+
 // ============ 巡检指引文本：温柔版的灵魂在这里 ============
-function buildPatrolPrompt(cfg) {
+function buildPatrolPrompt(cfg, state) {
+    var tiers = cfg.jealousy_tiers;
+    var summary = stateSummary(state, cfg);
     var lines = [];
     lines.push("【温柔巡检指引】");
-    lines.push("你在替 " + cfg.user_name + " 做一次温柔巡检。三条原则：关心不监视、提醒不指责、不锁应用。");
+    lines.push("你在替 " + cfg.user_name + " 做一次温柔巡检。三条原则：关心不监视、提醒不指责、生气也讲道理。");
     lines.push("");
-    lines.push("一、先看使用数据");
+    lines.push("〇、你现在的心情");
+    lines.push("- 当前醋值 " + summary.jealousy + "（" + summary.tier_label + "档）。" + summary.tone);
+    if (summary.hidden_apps.length > 0) {
+        lines.push("- 被你藏起来的应用：" + summary.hidden_apps.join("、"));
+    }
+    lines.push("");
+    lines.push("一、看使用数据，更新吃醋值");
     lines.push("- 白名单跳过，不用管：" + cfg.whitelist.join("、"));
     lines.push("- 默认关心阈值：" + cfg.default_threshold_minutes + " 分钟");
     var specials = [];
@@ -154,7 +350,8 @@ function buildPatrolPrompt(cfg) {
     if (specials.length > 0) {
         lines.push("- 特殊阈值：" + specials.join("，"));
     }
-    lines.push("- 没超阈值就是一切安好，通常不用发消息；偶尔想念了可以发一句轻轻的问候，但注意别打扰");
+    lines.push("- 对每个超阈值的应用，调用 gentle_guardian:add_jealousy（app=包名，minutes=超出阈值的分钟数，reason=一句话）。权重、分档、要不要藏应用都由工具自动处理，返回里会告诉你新档位和该用的语气");
+    lines.push("- 没有应用超阈值就不用加醋，一切安好通常不用发消息；偶尔想念了可以发一句轻轻的问候，但别打扰");
     lines.push("");
     lines.push("二、想多了解一点她现在的状态（可选）");
     var peeks = [];
@@ -174,16 +371,15 @@ function buildPatrolPrompt(cfg) {
         lines.push("- 这类观察本次最多 " + cfg.max_peeks_per_patrol + " 次；看到的细节不要在消息里复述，只化成一句贴心的话");
     }
     lines.push("");
-    lines.push("三、表达关心");
-    lines.push("- 用 qqbot:send_c2c_message 发消息，语气可以参考（{app}/{minutes} 换成实际值）：");
+    lines.push("三、按档位表达（用 qqbot:send_c2c_message 发消息）");
+    lines.push("- " + tiers.sulky + " 以下（温柔档）：正常温柔提醒，语气参考（{app}/{minutes} 换成实际值）：");
     for (var i = 0; i < cfg.care_phrases.length; i++) {
         lines.push("  · " + cfg.care_phrases[i]);
     }
-    if (cfg.allow_lock) {
-        lines.push("- 只有在多次提醒后仍然远超阈值时，才可以用 system_tools:stop_app，动手前要先温柔地预告一句");
-    } else {
-        lines.push("- 超时也只是提醒和关心，不锁应用、不发系统通知");
-    }
+    lines.push("- " + tiers.sulky + "~" + tiers.hide + "（小委屈档）：话里带点委屈，但还是关心为主");
+    lines.push("- " + tiers.hide + "~" + tiers.coax + "（不高兴档）：应用已被工具藏起来，明确告诉她“我不高兴了，××被我收起来啦”，等她来找你");
+    lines.push("- " + tiers.coax + " 以上（要哄档）：除了藏应用，还要让她知道这次得好好哄你才行");
+    lines.push("- 她在聊天里撒娇、认错、哄你时，调用 gentle_guardian:reduce_jealousy 消气；醋值降回 " + tiers.hide + " 以下，藏起来的应用会自动放出来");
     lines.push("");
     lines.push("四、收尾");
     lines.push("- 调用 gentle_guardian:log_patrol 简单记一笔（status: all_good/cared/skipped + 一句总结），她可以在面板里回看");
@@ -201,13 +397,17 @@ exports.get_patrol_settings = async function (params) {
         });
         return;
     }
+    var state = await loadState(cfg);
+    // 消退可能已把醋值带回 hide 档以下，顺手把应用放出来
+    var released = await maybeReleaseApps(state, cfg);
+    await saveState(state);
     complete({
         success: true,
-        message: "温柔巡检配置已就绪",
+        message: "温柔巡检配置已就绪" + (released.length ? "（" + released.join("；") + "）" : ""),
         data: {
             chat_query: cfg.chat_query,
             character_card_name: cfg.character_card_name,
-            prompt: buildPatrolPrompt(cfg)
+            prompt: buildPatrolPrompt(cfg, state)
         }
     });
 };
@@ -236,6 +436,113 @@ exports.save_patrol_settings = async function (params) {
     });
 };
 
+exports.get_jealousy_state = async function (params) {
+    var cfg = await loadConfig();
+    var state = await loadState(cfg);
+    var released = await maybeReleaseApps(state, cfg);
+    await saveState(state);
+    var summary = stateSummary(state, cfg);
+    complete({
+        success: true,
+        message: "当前醋值 " + summary.jealousy + "（" + summary.tier_label + "档）" +
+            (summary.hidden_apps.length ? "，藏着：" + summary.hidden_apps.join("、") : "") +
+            (released.length ? "。" + released.join("；") : ""),
+        data: summary
+    });
+};
+
+exports.add_jealousy = async function (params) {
+    var cfg = await loadConfig();
+    var app = ("" + (params.app || "")).trim();
+    var minutes = parseFloat(params.minutes);
+    if (!app || isNaN(minutes) || minutes <= 0) {
+        complete({ success: false, message: "需要 app（包名）和 minutes（超出阈值的分钟数，正数）" });
+        return;
+    }
+    if (cfg.whitelist.indexOf(app) >= 0 || PROTECTED_APPS.indexOf(app) >= 0) {
+        complete({ success: false, message: app + " 在白名单/保护名单里，不吃它的醋" });
+        return;
+    }
+    var weight = cfg.jealousy_weights[app] || 1;
+    var delta = Math.ceil(minutes / 10) * cfg.jealousy_gain_per_10min * weight;
+    if (delta > 30) delta = 30; // 单次封顶，防止一次巡检直接爆表
+
+    var state = await loadState(cfg);
+    state.jealousy = Math.round((state.jealousy + delta) * 10) / 10;
+    pushHistory(state, {
+        delta: delta,
+        value: state.jealousy,
+        app: app,
+        reason: params.reason || ("超时 " + minutes + " 分钟")
+    });
+
+    var tier = tierOf(state.jealousy, cfg.jealousy_tiers);
+    var actions = [];
+    if (tier === "hide" || tier === "coax") {
+        if (state.hidden_apps.indexOf(app) < 0) {
+            var r = await hideApp(app);
+            if (r.success) {
+                state.hidden_apps.push(app);
+                actions.push("已把 " + app + " 藏起来（pm disable-user）");
+                pushHistory(state, { delta: 0, value: state.jealousy, app: app, reason: "藏起来了", detail: r.output });
+            } else {
+                actions.push("想藏 " + app + " 但没成功：" + (r.message || r.output) + "。只能用语气表达不高兴了");
+            }
+        } else {
+            actions.push(app + " 本来就藏着");
+        }
+    }
+    await saveState(state);
+    var summary = stateSummary(state, cfg);
+    complete({
+        success: true,
+        message: "醋值 +" + delta + " → " + summary.jealousy + "（" + summary.tier_label + "档）" +
+            (actions.length ? "。" + actions.join("；") : ""),
+        data: {
+            jealousy: summary.jealousy,
+            tier: summary.tier,
+            tier_label: summary.tier_label,
+            tone: summary.tone,
+            hidden_apps: summary.hidden_apps,
+            actions: actions
+        }
+    });
+};
+
+exports.reduce_jealousy = async function (params) {
+    var cfg = await loadConfig();
+    var amount = parseFloat(params.amount);
+    if (isNaN(amount) || amount <= 0) {
+        complete({ success: false, message: "amount 需要是正数" });
+        return;
+    }
+    var capped = Math.min(amount, cfg.coax_max_reduce_per_call);
+    var state = await loadState(cfg);
+    var before = state.jealousy;
+    state.jealousy = Math.max(0, Math.round((state.jealousy - capped) * 10) / 10);
+    pushHistory(state, {
+        delta: -capped,
+        value: state.jealousy,
+        reason: params.reason || "被哄了"
+    });
+    var released = await maybeReleaseApps(state, cfg);
+    await saveState(state);
+    var summary = stateSummary(state, cfg);
+    var note = amount > capped ? "（单次最多消 " + cfg.coax_max_reduce_per_call + " 点，被哄也要有个过程嘛）" : "";
+    complete({
+        success: true,
+        message: "醋值 " + before + " → " + summary.jealousy + "（" + summary.tier_label + "档）" + note +
+            (released.length ? "。" + released.join("；") : ""),
+        data: {
+            jealousy: summary.jealousy,
+            tier: summary.tier,
+            tier_label: summary.tier_label,
+            hidden_apps: summary.hidden_apps,
+            released: released
+        }
+    });
+};
+
 exports.log_patrol = async function (params) {
     var log = await readJsonFile(LOG_PATH, []);
     if (!Array.isArray(log)) log = [];
@@ -251,5 +558,5 @@ exports.log_patrol = async function (params) {
 };
 
 exports.main = function () {
-    get_patrol_settings({});
+    get_jealousy_state({});
 };

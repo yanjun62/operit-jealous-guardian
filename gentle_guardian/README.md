@@ -1,9 +1,32 @@
 # 🌸 温柔巡检宝宝 Gentle Guardian
 
-吃醋巡检的温和版，打包成一整个 ToolPkg。核心变化有两个：
+吃醋巡检的温和版，打包成一整个 ToolPkg。三个核心：
 
-1. **关心代替惩罚**：不锁应用、不警告，AI 可以看看通知、看看当前屏幕（以后还能申请拍照）了解你在做什么，然后发一句贴心的话。
-2. **配置收进侧边栏**：老版本要手改工作流 JSON 里的四个地方，现在全部在侧边栏面板里填。工作流导入之后一个字都不用动——巡检时由第一个节点实时读取面板保存的配置。
+1. **动态吃醋状态机**：不是一次性的阈值报警。超时应用会累加吃醋值（权重可配，"情敌"应用加得更快），醋值分档决定 AI 的语气和行为；聊天里哄它会消气，时间也会慢慢治愈。
+2. **关心代替惩罚**：AI 可以看看通知、看看当前屏幕（以后还能申请拍照）了解你在做什么，然后发一句贴心的话。醋意大了会把应用"藏起来"而不是粗暴锁死。
+3. **配置收进侧边栏**：老版本要手改工作流 JSON 里的四个地方，现在全部在面板里填。工作流导入之后一个字都不用动。
+
+## 🍋 吃醋状态机
+
+```
+巡检发现超时 → add_jealousy(app, 超出分钟数)
+                └ 醋值 += ceil(分钟/10) × 每10分钟点数 × 应用权重（单次封顶30）
+
+醋值分档（默认，可在面板改）：
+   0-30   温柔档    正常温柔提醒
+  30-60   小委屈档  话里带点委屈，还是关心为主
+  60-90   不高兴档  把超时应用藏起来 + 发"我不高兴了"
+  90+     要哄档    应用藏着，需要你主动来哄
+
+消气的路：
+  · 聊天里撒娇/认错/哄它 → AI 调 reduce_jealousy（单次上限可配，被哄要有过程）
+  · 时间自然消退（默认每小时 -1，可配）
+  · 醋值降回藏应用档以下 → 藏起来的应用立刻全部放出来
+```
+
+**藏应用的实现**是 `pm disable-user --user 0 <包名>`：应用图标从桌面消失、点不开，`pm enable` 即恢复，不留痕迹。这需要 shell 权限（Shizuku 或 ADB）。白名单应用永远不会被藏，Operit 和 QQ 更是硬编码保护——藏了 QQ 就没人能哄它了。
+
+**逃生通道**：`pm disable-user` 是持久生效的，所以面板上有「🆘 紧急解除全部隐藏」按钮，AI 联系不上时你自己也能把应用放出来。最坏情况连 Operit 都出问题了，用电脑执行 `adb shell pm enable --user 0 <包名>` 一定能恢复。
 
 ## 📁 包结构
 
@@ -12,21 +35,30 @@ gentle_guardian/
 ├── manifest.json                        — ToolPkg 清单
 ├── main.js                              — 入口：注册侧边栏面板
 ├── packages/
-│   └── gentle_guardian_tools.js         — AI 工具：读配置/改配置/记巡检日志
+│   └── gentle_guardian_tools.js         — AI 工具（见下表）
 ├── ui/
 │   └── guardian_panel/
-│       └── index.ui.js                  — 设置面板（WebView + JS桥，配置落盘到文件）
+│       └── index.ui.js                  — 面板：醋值仪表 + 变动记录 + 全部设置 + 巡检日志
 └── workflow/
     └── gentle_patrol_workflow.json      — 🌸温柔巡检 工作流（导入后免修改）
 ```
 
-配置正本存在 `/sdcard/Download/Operit/plugins/gentle_guardian/config.json`，面板、AI 工具、工作流三方读写的都是这一份文件。
+| 工具 | 谁在什么时候调 |
+|---|---|
+| `get_patrol_settings` | 工作流第一个节点：读配置+当前醋值，生成巡检指引 |
+| `add_jealousy` | 巡检中 AI 对每个超时应用调一次；到档自动藏应用 |
+| `reduce_jealousy` | 平时聊天中 AI 被哄了就调；降档自动放应用 |
+| `get_jealousy_state` | AI 随时查自己心情；也会顺手结算消退、放该放的应用 |
+| `save_patrol_settings` | 聊天里让 AI 改配置（"小红书阈值改成两小时"） |
+| `log_patrol` | 巡检收尾记一笔，面板可回看 |
+
+数据都在 `/sdcard/Download/Operit/plugins/gentle_guardian/`：`config.json`（配置正本）、`jealousy_state.json`（醋值/藏的应用/变动历史）、`patrol_log.json`（巡检日志）。面板、AI 工具、工作流三方读写的是同一份文件。
 
 ## 🔗 和工作流怎么配合
 
 ```
 定时触发(每3小时)
-  ├→ gentle_guardian:get_patrol_settings   ← 读面板配置，生成巡检指引
+  ├→ gentle_guardian:get_patrol_settings   ← 读配置+醋值，生成巡检指引
   │     ├→ 提取对话标题 ──→ extended_chat:find_chat ──→ 提取chat_id ─┐
   │     ├→ 提取角色卡名 ─────────────────────────────────────────┤
   │     └→ 提取巡检指引 ─────────────────────────────────────────┤
@@ -34,13 +66,13 @@ gentle_guardian/
                                                                   ↓
                                               extended_chat:chat_with_agent
                                                 └→ AI 按指引巡检：
-                                                     ├─ 一切安好 → 通常不打扰
+                                                     ├─ 超时 → add_jealousy（到档自动藏应用）
                                                      ├─ 想了解 → 看通知/截屏（按面板开关）
-                                                     ├─ 超阈值 → QQ 发一句关心的话
-                                                     └─ 收尾 → log_patrol 记录（面板可回看）
+                                                     ├─ 按醋值档位发消息（温柔/委屈/不高兴/求哄）
+                                                     └─ 收尾 → log_patrol
 ```
 
-老版本里发消息、锁应用这些动作本来就是 AI 在 `chat_with_agent` 那一轮里自己调工具完成的，所以「观察」能力也走同一条路：不加新节点，只在指引文本里授权。AI 到时候看自己工具列表里有什么就用什么，通知/截图类工具名字对不上也不会报错，顶多退化成只看使用数据。
+消气发生在巡检之外：你平时跟角色聊天，它检测到你在哄它就调 `reduce_jealousy`——这条不走工作流，靠工具描述本身教会 AI 什么时候用。
 
 ## 🚀 安装
 
@@ -50,13 +82,13 @@ gentle_guardian/
    ```
 2. **导入**：Operit 工具箱 → 插件包 → 导入 `gentle_guardian.toolpkg`
 3. **启用子包**：装完记得手动启用「温柔巡检宝宝」（子包装好默认是关的，这是新人必踩的坑）
-4. **填配置**：打开侧边栏「温柔巡检宝宝」面板，填角色卡名称和 QQ Bot 对话标题（必填），其他按喜好调，点保存
+4. **填配置**：打开侧边栏面板，填角色卡名称和 QQ Bot 对话标题（必填），吃醋机制按喜好调，点保存
 5. **导入工作流**：工具箱 → 工作流 → 导入 `workflow/gentle_patrol_workflow.json`，启用即可，不需要改任何节点
-6. **权限**：和老版本一样需要「使用情况访问权限」；如果开了截屏观察，需要相应的无障碍/录屏权限
+6. **权限**：「使用情况访问权限」照旧；藏应用需要 Shizuku/ADB 级 shell；开了截屏观察需要相应权限
 
 ## 📷 关于摄像头
 
-面板里的「申请用前置摄像头看看你」开关默认关闭。它对应的 `take_front_photo` 工具来自另一个正在开发的相机包（Camera2 + WebView 桥方案，见仓库外的开发简报），装好那个包之后把开关打开，巡检指引里就会多一条：AI 可以申请拍一张看看你本人，你在弹窗里确认或拒绝，拒绝或超时它就只发文字关心。
+面板里的「申请用前置摄像头看看你」开关默认关闭。它对应的 `take_front_photo` 工具来自另一个正在开发的相机包（Camera2 + WebView 桥方案），装好后把开关打开，巡检指引里就会多一条：AI 可以申请拍一张看看你本人，你在弹窗里确认或拒绝，拒绝或超时它就只发文字关心。
 
 ## ⚠️ 装机前核对清单（重要）
 
@@ -65,6 +97,7 @@ gentle_guardian/
 - [ ] `main.js` 里 `registerUiRoute` 的真实签名（参考 `emotion_mixologist/main.js`）
 - [ ] `index.ui.js` 里 WebView controller 的创建方式（`ctx.UI.createWebViewController()` 是按简报推测的）
 - [ ] `Tools.Files.read` / `Tools.Files.write` 的方法名和返回结构（代码里对字符串和对象两种返回都做了兼容）
+- [ ] **shell 执行 API 的真实入口**——`execShell` 按 `Tools.System.shell/exec`、`Tools.Shell.exec` 等常见命名逐个尝试，都不对就照 examples 补一个；没有 shell 能力时藏应用会明确失败并告诉 AI 改用语气表达，不会把状态记乱
 - [ ] JS 桥方法的 Promise 返回值在 WebView 里 `await` 是否正常（简报里标注过需实测）
 - [ ] `manifest.json` 的字段名（对照 examples 的 manifest 模板）
 
