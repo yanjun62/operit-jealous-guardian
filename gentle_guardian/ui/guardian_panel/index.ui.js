@@ -151,21 +151,33 @@ panelController.addJavascriptInterface("Guardian", {
         }
     },
     // 摇一摇哄它：小幅消气；降回 hide 档以下同样放应用（检测算法在 HTML 侧，来自 pwa-sense-bridge / MIT）
+    // 架构备忘：按「一份逻辑两个入口」的原则，这里理想形态是 callTool 转发给
+    // gentle_guardian:reduce_jealousy，而不是面板侧复制状态机——ui 上下文的 callTool
+    // 签名尚未实测，验证可用后建议改成转发（对照 SandboxPackage_DEV 里 CoRead 的桥）。
     shakeCoax: async function (points) {
         try {
             var p = parseFloat(points);
             if (isNaN(p) || p <= 0) p = 2;
             var hideTier = 60;
+            var decayPerHour = 1;
             try {
                 var cfgRaw = await readFileSafe(CONFIG_PATH);
                 var cfg = cfgRaw ? JSON.parse(cfgRaw) : {};
                 if (cfg.jealousy_tiers && cfg.jealousy_tiers.hide) hideTier = cfg.jealousy_tiers.hide;
+                if (typeof cfg.jealousy_decay_per_hour === "number") decayPerHour = cfg.jealousy_decay_per_hour;
             } catch (e) { /* 读不到就按默认档位 */ }
             var raw = await readFileSafe(STATE_PATH);
             var state = raw ? JSON.parse(raw) : {};
             if (typeof state.jealousy !== "number" || isNaN(state.jealousy)) state.jealousy = 0;
             if (!Array.isArray(state.hidden_apps)) state.hidden_apps = [];
             if (!Array.isArray(state.history)) state.history = [];
+            // 先结算自然消退再扣——否则 updated_at 一刷新，积攒的消退就丢了（和工具子包 loadState 同款逻辑）
+            if (state.updated_at && decayPerHour > 0) {
+                var hoursIdle = (Date.now() - new Date(state.updated_at).getTime()) / 3600000;
+                if (hoursIdle > 0) {
+                    state.jealousy = Math.max(0, Math.round((state.jealousy - hoursIdle * decayPerHour) * 10) / 10);
+                }
+            }
             var before = state.jealousy;
             state.jealousy = Math.max(0, Math.round((state.jealousy - p) * 10) / 10);
             state.history.unshift({
@@ -624,7 +636,7 @@ function buildPanelHtml() {
     } catch (e) { /* 申请失败按不需要权限处理 */ }
     window.addEventListener("devicemotion", onMotion, true);
     shakeOn = true;
-    shakeSessionUsed = 0;
+    // 注意：shakeSessionUsed 不在这里清零——否则开关一关一开就绕过会话上限
     $("shakeBtn").textContent = "🫨 摇一摇已开启（再点关闭）";
     $("shakeHint").textContent = "摇吧！每摇一下消 " + (parseFloat(currentCfg.shake_coax_points) || 2) + " 点";
   });

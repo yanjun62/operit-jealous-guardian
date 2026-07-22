@@ -107,6 +107,7 @@ gentle_guardian/
 
 - MIUI 桌面图标在 unhide 后可能不自动恢复（见上文「桌面图标刷新」）
 - 摇一摇依赖 WebView 的 `devicemotion` 事件，Operit WebView 下尚未实测；不支持时按钮会明确提示，不影响其他功能
+- 摇一摇的降醋逻辑目前在面板桥里自带一份（含消退结算和放应用）。按「一份逻辑两个入口」的原则，验证过 ui 上下文的 `callTool` 可用后，建议改成转发给 `gentle_guardian:reduce_jealousy`（紧急解除除外——逃生通道必须不依赖子包）
 - `pm disable-user` 需要 Shizuku/ADB shell；没有 shell 能力时藏应用会明确失败并告诉 AI 改用语气表达，状态不会记乱
 - 面板 HTML 调试口诀：先把 HTML 单独放到工作区里修活，最后再搬回插件重新打包
 
