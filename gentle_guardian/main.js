@@ -1,21 +1,43 @@
 /*
  * gentle_guardian — ToolPkg 入口
  *
- * 职责只有一个：把侧边栏设置面板注册进 Operit 的工具箱。
- * 真正干活的逻辑都在 packages/gentle_guardian_tools.js（AI 工具）
- * 和 ui/guardian_panel/index.ui.js（设置面板）里。
- *
- * ⚠️ 装机前请对照 SandboxPackage_DEV 里 examples/emotion_mixologist/main.js
- * 核对 registerUiRoute 的真实签名——下面是按开发简报里的描述写的，
- * 参数名如有出入以 examples 为准。
+ * 对照 emotion_mixologist/main.js 的真实 API 签名：
+ *   - require UI 文件获取 Screen 函数
+ *   - ToolPkg.registerUiRoute 注册侧边栏路由
+ *   - ToolPkg.registerNavigationEntry 注册导航入口
+ *   - exports.registerToolPkg 导出注册函数
  */
 
-registerUiRoute({
-    id: "gentle_guardian_panel",
-    title: "温柔巡检宝宝",
-    icon: "favorite",
-    entry: "ui/guardian_panel/index.ui.js",
-    sidebar: true
-});
+var __importDefault = function(mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+var ui = __importDefault(require("./ui/guardian_panel/index.ui.js"));
+var Screen = ui.default;
 
-console.log("Gentle Guardian 温柔巡检宝宝已加载");
+function registerToolPkg() {
+    ToolPkg.registerUiRoute({
+        id: "gentle_guardian_sidebar",
+        runtime: "compose_dsl",
+        screen: Screen,
+        params: {},
+        title: {
+            zh: "🌸 温柔巡检宝宝",
+            en: "🌸 Gentle Guardian",
+        }
+    });
+
+    ToolPkg.registerNavigationEntry({
+        id: "gentle_guardian_sidebar_entry",
+        route: "toolpkg:com.operit.gentle_guardian:ui:gentle_guardian_sidebar",
+        surface: "main_sidebar_plugins",
+        title: {
+            zh: "🌸 巡检宝宝",
+            en: "🌸 Guardian",
+        },
+        order: 1,
+    });
+
+    return true;
+}
+
+exports.registerToolPkg = registerToolPkg;

@@ -16,7 +16,7 @@ METADATA
         {
             "name": "get_patrol_settings",
             "description": {
-                "zh": "读取温柔巡检配置和当前吃醋状态，返回 QQ 对话标题、角色卡名和本次巡检的完整指引文本。工作流的第一个执行节点调用它。",
+                "zh": "读取温柔巡检配置和当前吃醋状态，返回巡检对话标题、角色卡名和本次巡检的完整指引文本。工作流的第一个执行节点调用它。",
                 "en": "Read patrol config plus current jealousy state. Returns chat query, character card name, and the guidance prompt. Called by the workflow's first execute node."
             },
             "parameters": []
@@ -132,7 +132,7 @@ var CONFIG_PATH = BASE_DIR + "config.json";
 var LOG_PATH = BASE_DIR + "patrol_log.json";
 var STATE_PATH = BASE_DIR + "jealousy_state.json";
 
-// 通讯生命线：无论白名单怎么配，这两个永远不许 hide（藏了 QQ 就没人能哄它了）
+// 通讯生命线：无论白名单怎么配，这两个永远不许 hide（藏了联系通道就没人能哄它了）
 var PROTECTED_APPS = ["com.ai.assistance.operit", "com.tencent.mobileqq"];
 
 // ============ 默认配置：文件缺失/损坏时的兜底 ============
@@ -180,7 +180,12 @@ async function readJsonFile(path, fallback) {
         var raw = await Tools.Files.read(path);
         var content = typeof raw === "string" ? raw : (raw && (raw.content || (raw.data && raw.data.content))) || "";
         if (!content) return fallback;
-        return JSON.parse(content);
+        var parsed = JSON.parse(content);
+        // 兼容：Operit 的 Files.read 有时把 content 包成单元素数组 ["{...}"]
+        if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "string") {
+            parsed = JSON.parse(parsed[0]);
+        }
+        return parsed;
     } catch (e) {
         return fallback;
     }
@@ -215,7 +220,6 @@ async function loadConfig() {
 }
 
 // ============ shell 执行：hide/unhide 靠它（需要 Shizuku/ADB 级别的 shell 权限） ============
-// ⚠️ 装机时对照 SandboxPackage_DEV 确认真实的 shell API 名，下面按常见命名逐个尝试
 async function execShell(cmd) {
     var candidates = [];
     if (typeof Tools !== "undefined") {
@@ -256,6 +260,32 @@ async function unhideApp(pkg) {
     return await execShell("pm enable --user 0 " + pkg);
 }
 
+// 常见桌面包名：unhide 后 force-stop 一遍强制重建图标缓存
+var LAUNCHER_PKGS = [
+    "com.miui.home",
+    "com.android.launcher3",
+    "com.google.android.apps.nexuslauncher",
+    "com.sec.android.app.launcher",
+    "com.huawei.android.launcher",
+    "com.hihonor.android.launcher",
+    "com.oppo.launcher",
+    "com.bbk.launcher2",
+    "com.oneplus.launcher"
+];
+
+// unhide 后刷新桌面：部分桌面（尤其 MIUI）会缓存图标，pm enable 后图标不一定回来。
+// 1) 对每个放出的应用补 pm install-existing（MIUI 恢复图标的偏方）
+// 2) 把常见桌面进程 force-stop 一遍（不存在的包名会静默失败，无所谓）
+// MIUI 上即便如此图标仍可能不恢复（系统限制），见 README。
+async function refreshLauncher(releasedPkgs) {
+    for (var i = 0; i < releasedPkgs.length; i++) {
+        await execShell("pm install-existing " + releasedPkgs[i]);
+    }
+    for (var j = 0; j < LAUNCHER_PKGS.length; j++) {
+        await execShell("am force-stop " + LAUNCHER_PKGS[j]);
+    }
+}
+
 // ============ 吃醋状态机 ============
 function tierOf(value, tiers) {
     if (value >= tiers.coax) return "coax";
@@ -291,16 +321,18 @@ async function saveState(state) {
     await writeJsonFile(STATE_PATH, state);
 }
 
-// 醋值低于 hide 档时，把藏起来的应用全部放出来。返回动作描述列表。
+// 醋值低于 hide 档时，把藏起来的应用全部放出来（成功后顺手刷新桌面）。返回动作描述列表。
 async function maybeReleaseApps(state, cfg) {
     var actions = [];
     if (state.hidden_apps.length === 0) return actions;
     if (state.jealousy >= cfg.jealousy_tiers.hide) return actions;
     var remaining = [];
+    var releasedOk = [];
     for (var i = 0; i < state.hidden_apps.length; i++) {
         var pkg = state.hidden_apps[i];
         var r = await unhideApp(pkg);
         if (r.success) {
+            releasedOk.push(pkg);
             actions.push("已放出 " + pkg);
         } else {
             remaining.push(pkg);
@@ -308,6 +340,9 @@ async function maybeReleaseApps(state, cfg) {
         }
     }
     state.hidden_apps = remaining;
+    if (releasedOk.length > 0) {
+        await refreshLauncher(releasedOk);
+    }
     if (actions.length > 0) {
         pushHistory(state, { delta: 0, value: state.jealousy, reason: "醋消了，应用解禁", detail: actions.join("；") });
     }
@@ -351,18 +386,18 @@ function buildPatrolPrompt(cfg, state) {
         lines.push("- 特殊阈值：" + specials.join("，"));
     }
     lines.push("- 对每个超阈值的应用，调用 gentle_guardian:add_jealousy（app=包名，minutes=超出阈值的分钟数，reason=一句话）。权重、分档、要不要藏应用都由工具自动处理，返回里会告诉你新档位和该用的语气");
-    lines.push("- 没有应用超阈值就不用加醋，一切安好通常不用发消息；偶尔想念了可以发一句轻轻的问候，但别打扰");
+    lines.push("- ⚠️ 无论有没有超阈值，本轮都必须回复。一切安好就说一句温柔的问候，让" + cfg.user_name + "知道你来看过她。不要沉默。");
     lines.push("");
     lines.push("二、想多了解一点她现在的状态（可选）");
     var peeks = [];
     if (cfg.allow_notifications) {
-        peeks.push("- 可以看看最近的系统通知，了解她在忙什么（如果工具列表里有读取通知类的工具）");
+        peeks.push("- 可以用 system_tools:get_notifications（limit=10，include_ongoing=false）看看最近的通知，了解她在忙什么");
     }
     if (cfg.allow_screenshot) {
-        peeks.push("- 可以截一张当前屏幕/读一下当前页面信息，看看她正在做什么（如果有截图或页面信息类的工具）");
+        peeks.push("- 可以用 daily_life:take_screenshot 截一张当前屏幕，看看她正在做什么");
     }
     if (cfg.allow_camera) {
-        peeks.push("- 可以调用 take_front_photo 申请看看她本人。她会在弹窗里确认，拒绝或超时就算了，这次巡检不要再试第二遍");
+        peeks.push("- 可以调用 take_front_photo 申请看看她本人（如果工具列表里有这个工具）。她会在弹窗里确认，拒绝或超时就算了，这次巡检不要再试第二遍");
     }
     if (peeks.length === 0) {
         lines.push("- （观察功能都关着，只根据使用数据来判断就好）");
@@ -371,7 +406,7 @@ function buildPatrolPrompt(cfg, state) {
         lines.push("- 这类观察本次最多 " + cfg.max_peeks_per_patrol + " 次；看到的细节不要在消息里复述，只化成一句贴心的话");
     }
     lines.push("");
-    lines.push("三、按档位表达（用 qqbot:send_c2c_message 发消息）");
+    lines.push("三、按档位表达（直接在对话里回复，温柔地告诉" + cfg.user_name + "）");
     lines.push("- " + tiers.sulky + " 以下（温柔档）：正常温柔提醒，语气参考（{app}/{minutes} 换成实际值）：");
     for (var i = 0; i < cfg.care_phrases.length; i++) {
         lines.push("  · " + cfg.care_phrases[i]);
@@ -393,7 +428,7 @@ exports.get_patrol_settings = async function (params) {
     if (!cfg.chat_query || !cfg.character_card_name) {
         complete({
             success: false,
-            message: "温柔巡检还没配置完成：请打开侧边栏「温柔巡检宝宝」面板，填写 QQ Bot 对话标题和角色卡名称后再启用工作流。"
+            message: "温柔巡检还没配置完成：请打开侧边栏「温柔巡检宝宝」面板，填写巡检对话标题和角色卡名称后再启用工作流。"
         });
         return;
     }

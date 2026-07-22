@@ -3,8 +3,10 @@
 吃醋巡检的温和版，打包成一整个 ToolPkg。三个核心：
 
 1. **动态吃醋状态机**：不是一次性的阈值报警。超时应用会累加吃醋值（权重可配，"情敌"应用加得更快），醋值分档决定 AI 的语气和行为；聊天里哄它会消气，时间也会慢慢治愈。
-2. **关心代替惩罚**：AI 可以看看通知、看看当前屏幕（以后还能申请拍照）了解你在做什么，然后发一句贴心的话。醋意大了会把应用"藏起来"而不是粗暴锁死。
-3. **配置收进侧边栏**：老版本要手改工作流 JSON 里的四个地方，现在全部在面板里填。工作流导入之后一个字都不用动。
+2. **关心代替惩罚**：AI 可以看看通知、截一张当前屏幕（以后还能申请拍照）了解你在做什么，然后在对话里说句贴心的话。醋意大了会把应用"藏起来"而不是粗暴锁死。
+3. **配置收进侧边栏**：全部设置在面板里填，工作流导入之后一个字都不用动。
+
+> v0.2 起所有 API 均为设备实测版本（Operit 真机跑通）。
 
 ## 🍋 吃醋状态机
 
@@ -22,25 +24,28 @@
   · 聊天里撒娇/认错/哄它 → AI 调 reduce_jealousy（单次上限可配，被哄要有过程）
   · 时间自然消退（默认每小时 -1，可配）
   · 醋值降回藏应用档以下 → 藏起来的应用立刻全部放出来
+  · 面板「紧急解除」按钮 → 放出全部应用 + 醋值清零、档位归 calm
 ```
 
-**藏应用的实现**是 `pm disable-user --user 0 <包名>`：应用图标从桌面消失、点不开，`pm enable` 即恢复，不留痕迹。这需要 shell 权限（Shizuku 或 ADB）。白名单应用永远不会被藏，Operit 和 QQ 更是硬编码保护——藏了 QQ 就没人能哄它了。
+**藏应用的实现**是 `pm disable-user --user 0 <包名>`：应用图标从桌面消失、点不开，`pm enable` 即恢复。这需要 shell 权限（Shizuku 或 ADB）。白名单应用永远不会被藏，Operit 和 QQ 更是硬编码保护——藏了联系通道就没人能哄它了。
 
-**逃生通道**：`pm disable-user` 是持久生效的，所以面板上有「🆘 紧急解除全部隐藏」按钮，AI 联系不上时你自己也能把应用放出来。最坏情况连 Operit 都出问题了，用电脑执行 `adb shell pm enable --user 0 <包名>` 一定能恢复。
+**桌面图标刷新**：`pm enable` 之后会对放出的应用补一道 `pm install-existing`，再把常见桌面进程（MIUI/原生/三星/华为/荣耀/OPPO/vivo/一加）`am force-stop` 一遍强制重建图标缓存。⚠️ MIUI 上即便如此图标仍可能不恢复（系统限制）——应用本身已经能搜索到、能打开，只是桌面图标可能要手动加回来。
+
+**逃生通道**：`pm disable-user` 是持久生效的，所以面板上有「🆘 紧急解除全部隐藏」按钮，AI 联系不上时你自己也能把应用放出来（同时醋值清零）。最坏情况连 Operit 都出问题了，用电脑执行 `adb shell pm enable --user 0 <包名>` 一定能恢复。
 
 ## 📁 包结构
 
 ```
 gentle_guardian/
-├── manifest.json                        — ToolPkg 清单
-├── main.js                              — 入口：注册侧边栏面板
+├── manifest.json                        — ToolPkg 清单（schema_version/toolpkg_id/subpackages）
+├── main.js                              — 入口：registerUiRoute + registerNavigationEntry
 ├── packages/
 │   └── gentle_guardian_tools.js         — AI 工具（见下表）
 ├── ui/
 │   └── guardian_panel/
 │       └── index.ui.js                  — 面板：醋值仪表 + 变动记录 + 全部设置 + 巡检日志
 └── workflow/
-    └── gentle_patrol_workflow.json      — 🌸温柔巡检 工作流（导入后免修改）
+    └── gentle_patrol_workflow.json      — 🌸温柔巡检 工作流（导入后免修改，含手动触发节点）
 ```
 
 | 工具 | 谁在什么时候调 |
@@ -57,22 +62,25 @@ gentle_guardian/
 ## 🔗 和工作流怎么配合
 
 ```
-定时触发(每3小时)
+定时触发(每3小时) / 手动触发
   ├→ gentle_guardian:get_patrol_settings   ← 读配置+醋值，生成巡检指引
   │     ├→ 提取对话标题 ──→ extended_chat:find_chat ──→ 提取chat_id ─┐
   │     ├→ 提取角色卡名 ─────────────────────────────────────────┤
-  │     └→ 提取巡检指引 ─────────────────────────────────────────┤
-  └→ system_tools:get_app_usage_time ──→ 转文本 ──────────────────┤
+  │     └→ 提取巡检指引 ──┐                                       │
+  └→ get_app_usage_time ─┴→ CONCAT拼接完整消息 ──────────────────┤
                                                                   ↓
                                               extended_chat:chat_with_agent
                                                 └→ AI 按指引巡检：
                                                      ├─ 超时 → add_jealousy（到档自动藏应用）
-                                                     ├─ 想了解 → 看通知/截屏（按面板开关）
-                                                     ├─ 按醋值档位发消息（温柔/委屈/不高兴/求哄）
+                                                     ├─ 想了解 → get_notifications / take_screenshot
+                                                     ├─ 按醋值档位在对话里回复（温柔/委屈/不高兴/求哄）
                                                      └─ 收尾 → log_patrol
 ```
 
-消气发生在巡检之外：你平时跟角色聊天，它检测到你在哄它就调 `reduce_jealousy`——这条不走工作流，靠工具描述本身教会 AI 什么时候用。
+两个引擎层面的备忘：
+
+- **StaticValue 里的 `{{n2a}}` 这类模板不会被工作流引擎替换**——AI 收到的是原始字符串。所以消息必须用 CONCAT 模式的提取节点（`n_msg`）手动拼接，本工作流已经这样做了。改消息文案时改 `n_msg` 的 `others` 数组，别回去用 `{{}}`。
+- 消气不走工作流：你平时跟角色聊天，它检测到你在哄它就调 `reduce_jealousy`——靠工具描述本身教会 AI 什么时候用。
 
 ## 🚀 安装
 
@@ -81,27 +89,22 @@ gentle_guardian/
    cd gentle_guardian && zip -r ../gentle_guardian.toolpkg . && cd ..
    ```
 2. **导入**：Operit 工具箱 → 插件包 → 导入 `gentle_guardian.toolpkg`
-3. **启用子包**：装完记得手动启用「温柔巡检宝宝」（子包装好默认是关的，这是新人必踩的坑）
-4. **填配置**：打开侧边栏面板，填角色卡名称和 QQ Bot 对话标题（必填），吃醋机制按喜好调，点保存
-5. **导入工作流**：工具箱 → 工作流 → 导入 `workflow/gentle_patrol_workflow.json`，启用即可，不需要改任何节点
+3. **启用子包**：装完记得手动启用「温柔巡检」子包（默认关闭是常见的坑）
+4. **填配置**：打开侧边栏「🌸 巡检宝宝」面板，填角色卡名称和巡检对话标题（必填，巡检消息将发送到这个 Operit 对话），吃醋机制按喜好调，点保存
+5. **导入工作流**：工具箱 → 工作流 → 导入 `workflow/gentle_patrol_workflow.json`，启用即可；想立刻试一次就点「手动触发」节点
 6. **权限**：「使用情况访问权限」照旧；藏应用需要 Shizuku/ADB 级 shell；开了截屏观察需要相应权限
 
 ## 📷 关于摄像头
 
 面板里的「申请用前置摄像头看看你」开关默认关闭。它对应的 `take_front_photo` 工具来自另一个正在开发的相机包（Camera2 + WebView 桥方案），装好后把开关打开，巡检指引里就会多一条：AI 可以申请拍一张看看你本人，你在弹窗里确认或拒绝，拒绝或超时它就只发文字关心。
 
-## ⚠️ 装机前核对清单（重要）
+通知和截屏观察用的是 Operit 自带工具，实测可用：`system_tools:get_notifications`、`daily_life:take_screenshot`。
 
-这个包是照着架构指南和开发简报写的，以下 API 名称需要在设备上对照 `SandboxPackage_DEV` 的 examples 确认，不一致就照 examples 改：
+## ⚠️ 已知限制
 
-- [ ] `main.js` 里 `registerUiRoute` 的真实签名（参考 `emotion_mixologist/main.js`）
-- [ ] `index.ui.js` 里 WebView controller 的创建方式（`ctx.UI.createWebViewController()` 是按简报推测的）
-- [ ] `Tools.Files.read` / `Tools.Files.write` 的方法名和返回结构（代码里对字符串和对象两种返回都做了兼容）
-- [ ] **shell 执行 API 的真实入口**——`execShell` 按 `Tools.System.shell/exec`、`Tools.Shell.exec` 等常见命名逐个尝试，都不对就照 examples 补一个；没有 shell 能力时藏应用会明确失败并告诉 AI 改用语气表达，不会把状态记乱
-- [ ] JS 桥方法的 Promise 返回值在 WebView 里 `await` 是否正常（简报里标注过需实测）
-- [ ] `manifest.json` 的字段名（对照 examples 的 manifest 模板）
-
-调试口诀：面板 HTML 出问题，先把 HTML 单独放到工作区里修活，最后再搬回插件重新打包。
+- MIUI 桌面图标在 unhide 后可能不自动恢复（见上文「桌面图标刷新」）
+- `pm disable-user` 需要 Shizuku/ADB shell；没有 shell 能力时藏应用会明确失败并告诉 AI 改用语气表达，状态不会记乱
+- 面板 HTML 调试口诀：先把 HTML 单独放到工作区里修活，最后再搬回插件重新打包
 
 ## 📄 许可证
 

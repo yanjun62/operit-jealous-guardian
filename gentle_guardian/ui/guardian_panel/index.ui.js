@@ -1,3 +1,4 @@
+function Screen(ctx) {
 /*
  * 温柔巡检宝宝 — 侧边栏面板（设置 + 醋值仪表 + 记录）
  *
@@ -5,11 +6,6 @@
  *   1. 创建 WebView 加载内嵌的面板 HTML
  *   2. 注入 Guardian 桥（loadConfig / saveConfig / loadState / loadLog / emergencyUnhide），内部走 Tools.Files
  *   3. 别的什么都不干
- *
- * ⚠️ 装机前对照 SandboxPackage_DEV 的 examples/emotion_mixologist/ui/ 核对：
- *   - WebView controller 的创建方式（下面按开发简报写的）
- *   - Tools.Files.read/write 的真实方法名与返回结构
- *   - shell 执行 API（紧急解除要用）
  *
  * 路径必须与 packages/gentle_guardian_tools.js 里的常量保持一致！
  */
@@ -22,7 +18,17 @@ var STATE_PATH = BASE_DIR + "jealousy_state.json";
 async function readFileSafe(path) {
     try {
         var raw = await Tools.Files.read(path);
-        return typeof raw === "string" ? raw : (raw && (raw.content || (raw.data && raw.data.content))) || "";
+        var content = typeof raw === "string" ? raw : (raw && (raw.content || (raw.data && raw.data.content))) || "";
+        // 兼容：Operit 的 Files.read 有时把 content 包成单元素数组 ["{...}"]
+        if (typeof content === "string" && content.trim().startsWith('[')) {
+            try {
+                var arr = JSON.parse(content);
+                if (Array.isArray(arr) && arr.length > 0 && typeof arr[0] === "string") {
+                    content = arr[0];
+                }
+            } catch (e) {}
+        }
+        return content;
     } catch (e) {
         return "";
     }
@@ -60,7 +66,29 @@ async function execShell(cmd) {
     return { success: false, message: "shell 执行失败：" + lastErr };
 }
 
-var panelController = ctx.UI.createWebViewController();
+// 常见桌面包名：unhide 后 force-stop 一遍强制重建图标缓存（与工具子包同款）
+var LAUNCHER_PKGS = [
+    "com.miui.home",
+    "com.android.launcher3",
+    "com.google.android.apps.nexuslauncher",
+    "com.sec.android.app.launcher",
+    "com.huawei.android.launcher",
+    "com.hihonor.android.launcher",
+    "com.oppo.launcher",
+    "com.bbk.launcher2",
+    "com.oneplus.launcher"
+];
+
+async function refreshLauncher(releasedPkgs) {
+    for (var i = 0; i < releasedPkgs.length; i++) {
+        await execShell("pm install-existing " + releasedPkgs[i]);
+    }
+    for (var j = 0; j < LAUNCHER_PKGS.length; j++) {
+        await execShell("am force-stop " + LAUNCHER_PKGS[j]);
+    }
+}
+
+var panelController = ctx.createWebViewController("gentle_guardian_panel");
 
 panelController.addJavascriptInterface("Guardian", {
     loadConfig: async function () {
@@ -81,45 +109,42 @@ panelController.addJavascriptInterface("Guardian", {
     loadLog: async function () {
         return await readFileSafe(LOG_PATH);
     },
-    // 逃生通道：QQ 链路断了、AI 联系不上时，人也要能把应用放出来
+    // 逃生通道：AI 联系不上时，人也要能把应用放出来。醋值清零、档位归 calm。
     emergencyUnhide: async function () {
         try {
             var raw = await readFileSafe(STATE_PATH);
             var state = raw ? JSON.parse(raw) : {};
             var hidden = Array.isArray(state.hidden_apps) ? state.hidden_apps : [];
             var failed = [];
+            var releasedOk = [];
             for (var i = 0; i < hidden.length; i++) {
                 var r = await execShell("pm enable --user 0 " + hidden[i]);
-                if (!r.success) failed.push(hidden[i] + "（" + r.message + "）");
+                if (r.success) {
+                    releasedOk.push(hidden[i]);
+                } else {
+                    failed.push(hidden[i] + "（" + r.message + "）");
+                }
             }
-            state.hidden_apps = failed.length ? hidden.filter(function (p) {
-                return failed.some(function (f) { return f.indexOf(p) === 0; });
-            }) : [];
-            // 压到藏应用档以下（按当前配置算），不然下次巡检立刻又藏回去
-            var hideTier = 60;
-            try {
-                var cfgRaw = await readFileSafe(CONFIG_PATH);
-                var cfg = cfgRaw ? JSON.parse(cfgRaw) : {};
-                if (cfg.jealousy_tiers && cfg.jealousy_tiers.hide) hideTier = cfg.jealousy_tiers.hide;
-            } catch (e) { /* 读不到就按默认档位 */ }
-            state.jealousy = Math.min(
-                typeof state.jealousy === "number" ? state.jealousy : 0,
-                Math.max(0, hideTier - 10)
-            );
+            if (releasedOk.length > 0) {
+                await refreshLauncher(releasedOk);
+            }
+            // 紧急解除 = 彻底重置：醋值归零、隐藏列表清空
+            state.jealousy = 0;
+            state.hidden_apps = [];
             state.history = Array.isArray(state.history) ? state.history : [];
             state.history.unshift({
                 time: new Date().toISOString(),
                 delta: 0,
-                value: state.jealousy,
-                reason: "紧急解除（面板操作）"
+                value: 0,
+                reason: "紧急解除（面板操作），醋值清零"
             });
             state.updated_at = new Date().toISOString();
             await Tools.Files.write(STATE_PATH, JSON.stringify(state, null, 2));
             return JSON.stringify({
                 success: failed.length === 0,
                 message: failed.length === 0
-                    ? (hidden.length ? "全部放出来啦" : "本来就没有藏着的应用")
-                    : "部分失败：" + failed.join("；")
+                    ? (hidden.length ? "全部放出来啦，醋值已清零" : "本来就没有藏着的应用，醋值已清零")
+                    : "醋值已清零，但这些没放出来：" + failed.join("；") + "。可用电脑 adb shell pm enable 包名 恢复"
             });
         } catch (e) {
             return JSON.stringify({ success: false, message: "" + e.message });
@@ -200,7 +225,7 @@ function buildPanelHtml() {
     <div class="meter-marks"><span id="m0">0 温柔</span><span id="m1">30 委屈</span><span id="m2">60 藏应用</span><span id="m3">90 要哄</span></div>
     <div class="hidden-apps" id="hiddenApps"></div>
     <button class="ghost" id="unhideBtn">🆘 紧急解除全部隐藏</button>
-    <div class="hint">给 AI 联系不上时留的逃生通道；也可以用电脑 adb shell pm enable 包名 恢复</div>
+    <div class="hint">AI 联系不上时的逃生通道：放出全部应用并把醋值清零；也可以用电脑 adb shell pm enable 包名 恢复</div>
   </div>
 
   <div class="card">
@@ -214,9 +239,9 @@ function buildPanelHtml() {
     <input type="text" id="user_name" placeholder="宝宝">
     <label>角色卡名称</label>
     <input type="text" id="character_card_name" placeholder="必填，和 Operit 里的角色卡完全一致">
-    <label>QQ Bot 对话标题</label>
-    <input type="text" id="chat_query" placeholder="必填，比如 C2C_MESSAGE_CREATE">
-    <div class="hint">巡检消息会发到这个对话对应的 QQ 上</div>
+    <label>巡检对话标题</label>
+    <input type="text" id="chat_query" placeholder="必填，Operit 里巡检对话的标题">
+    <div class="hint">巡检消息将发送到这个 Operit 对话</div>
   </div>
 
   <div class="card">
@@ -446,7 +471,7 @@ function buildPanelHtml() {
   $("save").addEventListener("click", async function () {
     var cfg = readForm();
     if (!cfg.character_card_name || !cfg.chat_query) {
-      setStatus("⚠️ 角色卡名称和 QQ Bot 对话标题是必填的哦");
+      setStatus("⚠️ 角色卡名称和巡检对话标题是必填的哦");
       return;
     }
     if (!(cfg.jealousy_tiers.sulky < cfg.jealousy_tiers.hide && cfg.jealousy_tiers.hide < cfg.jealousy_tiers.coax)) {
@@ -497,3 +522,5 @@ return ctx.UI.WebView({
     domStorageEnabled: true,
     controller: panelController
 });
+}
+exports.default = Screen;

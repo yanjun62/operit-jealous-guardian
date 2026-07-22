@@ -1,29 +1,32 @@
 {
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.gentle_guardian",
+  "version": "0.2.0",
+  "author": ["Kate", "Ash"],
+  "main": "main.js",
   "name": "gentle_guardian",
   "display_name": {
     "zh": "温柔巡检宝宝",
     "en": "Gentle Guardian"
   },
-  "version": "0.1.0",
   "description": {
     "zh": "吃醋巡检的温和版：定时看看你在做什么，用关心代替警告和锁应用。所有配置都在侧边栏面板里完成，工作流导入后不需要手改。",
     "en": "The gentle sibling of Jealous Guardian: periodic check-ins that express care instead of warnings and app locks. All settings live in the sidebar panel; the workflow needs no manual editing after import."
   },
-  "author": "Kate & Ash",
   "category": "COMPANION",
-  "entry": "main.js",
-  "packages": [
-    "packages/gentle_guardian_tools.js"
-  ],
-  "ui": [
+  "subpackages": [
     {
-      "id": "guardian_panel",
-      "entry": "ui/guardian_panel/index.ui.js",
-      "title": {
-        "zh": "温柔巡检宝宝",
-        "en": "Gentle Guardian"
+      "id": "gentle_guardian",
+      "entry": "packages/gentle_guardian_tools.js",
+      "enabled_by_default": true,
+      "display_name": {
+        "zh": "温柔巡检",
+        "en": "Gentle Patrol"
       },
-      "sidebar": true
+      "description": {
+        "zh": "巡检工具 + 吃醋状态机：读配置、加醋、消醋、记日志",
+        "en": "Patrol tools + jealousy state machine: config, add/reduce jealousy, logging"
+      }
     }
   ]
 }
