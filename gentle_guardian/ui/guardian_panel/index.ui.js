@@ -199,7 +199,7 @@ panelController.addJavascriptInterface("Guardian", {
                 value: state.jealousy,
                 reason: "被摇一摇哄了 🫨"
             });
-            if (state.history.length > 100) state.history = state.history.slice(0, 100);
+            if (state.history.length > 50) state.history = state.history.slice(0, 50);
             var released = [];
             if (state.jealousy < hideTier && state.hidden_apps.length > 0) {
                 var remaining = [];
@@ -262,6 +262,8 @@ panelController.addJavascriptInterface("Guardian", {
             var archive = JSON.parse(await readFileSafe(ARCHIVE_PATH) || "[]");
             if (!Array.isArray(archive)) archive = [];
             archive.unshift(entry);
+            // 收藏封顶100条：不然文件越攒越大，开面板越来越卡
+            if (archive.length > 100) archive = archive.slice(0, 100);
             await Tools.Files.write(ARCHIVE_PATH, JSON.stringify(archive, null, 2));
             return JSON.stringify({ success: true, message: "已归档" });
         } catch (e) {
@@ -287,21 +289,50 @@ panelController.addJavascriptInterface("Guardian", {
             return "{}";
         }
     },
-    // 📷 直接打开系统相机（MIUI WebView 不认 capture="user"，走 shell 绕过）
+    // 📷 打开系统相机。用普通拍照模式 STILL_IMAGE_CAMERA：快门直接存进相册。
+    // 之前用的 IMAGE_CAPTURE 是「拍完把结果返回给调用方」的模式，shell 启动没有接收方，
+    // 很多相机拍完根本存不下来——这就是「无法保存」的原因。
     openCamera: async function () {
         try {
-            var result = await execShell("am start -a android.media.action.IMAGE_CAPTURE");
-            return JSON.stringify(result);
+            var r = await execShell("am start -a android.media.action.STILL_IMAGE_CAMERA");
+            if (!r.success) r = await execShell("am start -a android.media.action.IMAGE_CAPTURE");
+            return JSON.stringify(r);
         } catch (e) {
             return JSON.stringify({ success: false, message: "" + e.message });
         }
     },
-    // 扫描系统相册最新照片，复制到 photos/latest.jpg
+    // 扫描系统相册最近30分钟的最新照片并真正导入：转 base64 存进 photos/latest.jpg。
+    // 返回 unchanged=true 表示最新照片就是上次导入的那张（没有新照片）。
     scanLatestPhoto: async function () {
         try {
-            var cmd = "find /sdcard/DCIM /sdcard/Pictures -name '*.jpg' -mmin -30 2>/dev/null | xargs ls -t 2>/dev/null | head -1";
-            var result = await execShell(cmd);
-            return JSON.stringify(result);
+            var photoDir = BASE_DIR + "photos/";
+            var photoPath = photoDir + "latest.jpg";
+            var findCmd = "find /sdcard/DCIM /sdcard/Pictures \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \\) -mmin -30 2>/dev/null | xargs ls -t 2>/dev/null | head -1";
+            var scanRes = await execShell(findCmd);
+            var latest = (scanRes.success && scanRes.output) ? scanRes.output.trim().split("\n")[0].trim() : "";
+            if (!latest || latest.charAt(0) !== "/") {
+                return JSON.stringify({ success: false, message: "最近30分钟没有新照片" });
+            }
+            var prevSource = "";
+            try {
+                var prevRaw = await readFileSafe(photoPath);
+                if (prevRaw) { var prev = JSON.parse(prevRaw); prevSource = (prev && prev.source) || ""; }
+            } catch (e) { /* 旧格式没有 source 字段，当作没导入过 */ }
+            if (latest === prevSource) {
+                return JSON.stringify({ success: true, unchanged: true, path: photoPath, source: latest });
+            }
+            try { await Tools.Files.createDirectory(photoDir); } catch (e) { /* 目录可能已存在 */ }
+            var b64Res = await execShell("base64 -w0 '" + latest.replace(/'/g, "") + "'");
+            var data = (b64Res.success && b64Res.output) ? b64Res.output.replace(/\s/g, "") : "";
+            if (!data || !/^[A-Za-z0-9+/=]+$/.test(data)) {
+                return JSON.stringify({ success: false, message: "照片转码失败" });
+            }
+            await Tools.Files.write(photoPath, JSON.stringify({
+                base64: data,
+                timestamp: localTime(),
+                source: latest
+            }));
+            return JSON.stringify({ success: true, path: photoPath, kb: Math.round(data.length / 1024), source: latest });
         } catch (e) {
             return JSON.stringify({ success: false, message: "" + e.message });
         }
@@ -330,6 +361,16 @@ panelController.addJavascriptInterface("Guardian", {
                 }
             } catch (e) { /* 没设置过就继续往下找 */ }
             var name = ("" + (cardName || "")).trim().replace(/['"\\$`;|&<>]/g, "");
+            // 0.5) 自动匹配的缓存：找到过一次就存下来，之后开面板直接用，不再全盘 find（性能关键）
+            try {
+                var cacheRaw = await readFileSafe(BASE_DIR + "avatar_cache.json");
+                if (cacheRaw) {
+                    var cache = JSON.parse(cacheRaw);
+                    if (cache && cache.base64 && cache.card === name) {
+                        return JSON.stringify({ base64: cache.base64, source: cache.source || "cache" });
+                    }
+                }
+            } catch (e) { /* 缓存坏了/角色卡换了就重新找 */ }
             var IMG_EXPR = "\\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \\)";
             var SEARCH_ROOTS = "/sdcard/Download/Operit /sdcard/Operit /sdcard/Android/data/com.ai.assistance.operit/files";
             var AVATAR_DIRS = "/sdcard/Download/Operit/avatars " + BASE_DIR + "avatars";
@@ -349,7 +390,9 @@ panelController.addJavascriptInterface("Guardian", {
                             if (typeof b64field === "string" && b64field.length > 100) {
                                 var comma = b64field.indexOf(",");
                                 if (comma > -1) b64field = b64field.slice(comma + 1);
-                                return JSON.stringify({ base64: b64field.replace(/\s/g, ""), source: jsonPath });
+                                var jb64 = b64field.replace(/\s/g, "");
+                                try { await Tools.Files.write(BASE_DIR + "avatar_cache.json", JSON.stringify({ card: name, base64: jb64, source: jsonPath })); } catch (e) {}
+                                return JSON.stringify({ base64: jb64, source: jsonPath });
                             }
                         } catch (e) { /* 备份不是能读的 JSON，继续往下找 */ }
                     }
@@ -366,6 +409,7 @@ panelController.addJavascriptInterface("Guardian", {
                 var data = b64.output.replace(/\s/g, "");
                 // 只接受长得像 base64 的输出，防止 shell 返回结构体被误当图片
                 if (data && /^[A-Za-z0-9+/=]+$/.test(data)) {
+                    try { await Tools.Files.write(BASE_DIR + "avatar_cache.json", JSON.stringify({ card: name, base64: data, source: found })); } catch (e) {}
                     return JSON.stringify({ base64: data, source: found });
                 }
             }
@@ -1057,6 +1101,14 @@ function buildPanelHtml() {
       if (arcRaw) renderArchive(JSON.parse(arcRaw));
     } catch (e) { /* 没有归档就算了 */ }
     await loadAvatar();
+    // 兜底补扫：去相机拍照回来面板可能被重建、轮询断了——开面板时静默扫一次，
+    // 有没导入的新照片就补上（unchanged=true 表示最新照片早就导过，不打扰）
+    try {
+      var scanRes = JSON.parse(await Guardian.scanLatestPhoto());
+      if (scanRes.success && !scanRes.unchanged) {
+        setStatus("📷 发现刚拍的新照片，已自动导入 (" + (scanRes.kb || "?") + " KB)");
+      }
+    } catch (e) { /* 没有就算了 */ }
   }
 
   $("save").addEventListener("click", async function () {
@@ -1102,30 +1154,38 @@ function buildPanelHtml() {
     }
   });
 
-  // 📷 拍照：打开系统相机 → 8秒后自动扫描导入
+  // 📷 拍照：打开系统相机（普通拍照模式，快门直接存相册）→ 每8秒扫一次相册自动导入。
+  // 去了相机再回来面板可能被重建、轮询会断——所以 init() 里还有一次兜底补扫。
   $("cameraBtn").addEventListener("click", async function () {
     setStatus("📷 正在打开相机…");
     try {
       var res = JSON.parse(await Guardian.openCamera());
-      if (res.success) {
-        setStatus("📷 拍吧！8秒后自动扫描导入");
-        setTimeout(async function () {
-          setStatus("🔍 正在扫描相册…");
-          try {
-            var scanRes = JSON.parse(await Guardian.scanLatestPhoto());
-            if (scanRes.success && scanRes.message.indexOf("copied") === 0) {
-              var parts = scanRes.message.split(":");
-              setStatus("✅ 导入成功！" + (parts[2] ? " (" + Math.round(parseInt(parts[2])/1024) + " KB)" : ""));
-            } else {
-              setStatus("没找到新照片～可能还在保存中，稍等再点一次 📷");
-            }
-          } catch (e) {
+      if (!res.success) {
+        setStatus("打开相机失败：" + (res.message || ""));
+        return;
+      }
+      setStatus("📷 拍吧！拍完我自动导入；如果回来没导上，再点一次📷就好");
+      var attempts = 0;
+      var timer = setInterval(async function () {
+        attempts++;
+        try {
+          var scanRes = JSON.parse(await Guardian.scanLatestPhoto());
+          if (scanRes.success && !scanRes.unchanged) {
+            clearInterval(timer);
+            setStatus("✅ 导入成功！(" + (scanRes.kb || "?") + " KB) AI下次巡检就能看到");
+          } else if (attempts >= 6) {
+            clearInterval(timer);
+            setStatus("还没扫到新照片～拍好后再点一次 📷，或用 📎 直接上传");
+          } else {
+            setStatus("🔍 等照片保存中…(" + attempts + "/6)");
+          }
+        } catch (e) {
+          if (attempts >= 6) {
+            clearInterval(timer);
             setStatus("扫描失败：" + e.message);
           }
-        }, 8000);
-      } else {
-        setStatus("打开相机失败：" + (res.message || ""));
-      }
+        }
+      }, 8000);
     } catch (e) {
       setStatus("失败：" + e.message);
     }

@@ -323,7 +323,7 @@ function tierOf(value, tiers) {
 function pushHistory(state, entry) {
     entry.time = localTime();
     state.history.unshift(entry);
-    if (state.history.length > 100) state.history = state.history.slice(0, 100);
+    if (state.history.length > 50) state.history = state.history.slice(0, 50);
 }
 
 // 读状态并做懒消退：距上次更新每过1小时消退 decay 点（可配），时间会慢慢治愈醋意
@@ -630,9 +630,11 @@ exports.log_patrol = async function (params) {
     complete({ success: true, message: "已记录本次巡检" });
 };
 
-// 📷 拍照：shell 启动系统相机（和面板里用的是同一个命令，不走第三方应用）
+// 📷 拍照：shell 启动系统相机（和面板同款）。用普通拍照模式 STILL_IMAGE_CAMERA，
+// 快门直接存相册；IMAGE_CAPTURE 是「结果返回调用方」模式，shell 启动没有接收方会存不下来。
 exports.take_front_photo = async function (params) {
-    var r = await execShell("am start -a android.media.action.IMAGE_CAPTURE");
+    var r = await execShell("am start -a android.media.action.STILL_IMAGE_CAMERA");
+    if (!r.success) r = await execShell("am start -a android.media.action.IMAGE_CAPTURE");
     if (r.success) {
         complete({
             success: true,
@@ -651,7 +653,7 @@ exports.read_latest_photo = async function (params) {
     try {
         var photoDir = BASE_DIR + "photos/";
         var photoPath = photoDir + "latest.jpg";
-        var scanCmd = "find /sdcard/DCIM /sdcard/Pictures -name '*.jpg' -mmin -30 2>/dev/null | xargs ls -t 2>/dev/null | head -1";
+        var scanCmd = "find /sdcard/DCIM /sdcard/Pictures \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \\) -mmin -30 2>/dev/null | xargs ls -t 2>/dev/null | head -1";
         var scanRes = await execShell(scanCmd);
         if (!scanRes.success || !scanRes.output || scanRes.output.trim() === "") {
             complete({
