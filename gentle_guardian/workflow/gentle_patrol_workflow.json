@@ -1,0 +1,155 @@
+{
+  "name": "🌸温柔巡检",
+  "description": "吃醋巡检的温和版：定时看看使用情况，AI 用关心代替警告。导入后不需要手改任何节点——所有配置都在「温柔巡检宝宝」侧边栏面板里设置。",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "每N小时巡检",
+      "description": "定时触发温柔巡检。频率可改 interval_ms。",
+      "position": { "x": -700, "y": 280 },
+      "type": "trigger",
+      "triggerType": "schedule",
+      "triggerConfig": {
+        "schedule_type": "interval",
+        "interval_ms": "10800000",
+        "repeat": "true",
+        "enabled": "true"
+      }
+    },
+    {
+      "id": "n_manual",
+      "name": "手动触发",
+      "description": "点一下就跑一次巡检",
+      "position": { "x": -700 },
+      "type": "trigger",
+      "triggerConfig": {
+        "enabled": "true"
+      }
+    },
+    {
+      "id": "n0",
+      "name": "读巡检配置",
+      "position": { "x": -400, "y": -120 },
+      "type": "execute",
+      "actionType": "gentle_guardian:get_patrol_settings"
+    },
+    {
+      "id": "n0q",
+      "name": "提取对话标题",
+      "position": { "x": -150, "y": -260 },
+      "type": "extract",
+      "source": { "nodeId": "n0" },
+      "mode": "JSON",
+      "expression": "data.chat_query"
+    },
+    {
+      "id": "n0c",
+      "name": "提取角色卡名",
+      "position": { "x": -150, "y": 40 },
+      "type": "extract",
+      "source": { "nodeId": "n0" },
+      "mode": "JSON",
+      "expression": "data.character_card_name"
+    },
+    {
+      "id": "n0s",
+      "name": "提取巡检指引",
+      "position": { "x": -150, "y": 160 },
+      "type": "extract",
+      "source": { "nodeId": "n0" },
+      "mode": "JSON",
+      "expression": "data.prompt"
+    },
+    {
+      "id": "n2",
+      "name": "查应用使用时长",
+      "position": { "y": 420 },
+      "type": "execute",
+      "actionType": "system_tools:get_app_usage_time",
+      "actionConfig": {
+        "since_hours": { "value": "3" },
+        "limit": { "value": "30" },
+        "include_system_apps": { "value": "false" }
+      }
+    },
+    {
+      "id": "n2a",
+      "name": "提取使用数据文本",
+      "position": { "x": 300, "y": 420 },
+      "type": "extract",
+      "source": { "nodeId": "n2" },
+      "mode": "JSON",
+      "expression": "data"
+    },
+    {
+      "id": "n3",
+      "name": "找巡检对话",
+      "description": "按面板里配置的标题查找巡检对话",
+      "position": { "x": 100, "y": -260 },
+      "type": "execute",
+      "actionType": "extended_chat:find_chat",
+      "actionConfig": {
+        "query": { "nodeId": "n0q" }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "提取对话ID",
+      "position": { "x": 350, "y": -260 },
+      "type": "extract",
+      "source": { "nodeId": "n3" },
+      "mode": "JSON",
+      "expression": "data.chat.id"
+    },
+    {
+      "id": "n5",
+      "name": "AI温柔巡检",
+      "description": "把指引和使用数据交给 AI 角色",
+      "position": { "x": 650, "y": 160 },
+      "type": "execute",
+      "actionType": "extended_chat:chat_with_agent",
+      "actionConfig": {
+        "message": { "nodeId": "n_msg" },
+        "character_card_name": { "nodeId": "n0c" },
+        "chat_id": { "nodeId": "n4" },
+        "timeout": { "value": "300000" },
+        "persist_turn": { "value": "true" },
+        "hide_user_message": { "value": "true" }
+      }
+    },
+    {
+      "id": "n_msg",
+      "name": "拼接巡检消息",
+      "description": "把指引文本、使用数据拼成完整消息（StaticValue 里的 {{}} 模板不会被引擎替换，必须用 CONCAT 拼）",
+      "position": { "x": 450, "y": 160 },
+      "type": "extract",
+      "mode": "CONCAT",
+      "others": [
+        { "value": "🌸 温柔巡检时间～\n\n" },
+        { "nodeId": "n0s" },
+        { "value": "\n\n下面是最近3小时的应用使用数据：\n\n" },
+        { "nodeId": "n2a" },
+        { "value": "\n\n请温柔地完成这次巡检。" }
+      ]
+    }
+  ],
+  "connections": [
+    { "id": "c1", "sourceNodeId": "n1", "targetNodeId": "n0", "condition": "on_success" },
+    { "id": "c2", "sourceNodeId": "n1", "targetNodeId": "n2", "condition": "on_success" },
+    { "id": "cm1", "sourceNodeId": "n_manual", "targetNodeId": "n0", "condition": "on_success" },
+    { "id": "cm2", "sourceNodeId": "n_manual", "targetNodeId": "n2", "condition": "on_success" },
+    { "id": "c3", "sourceNodeId": "n0", "targetNodeId": "n0q", "condition": "on_success" },
+    { "id": "c4", "sourceNodeId": "n0", "targetNodeId": "n0c", "condition": "on_success" },
+    { "id": "c5", "sourceNodeId": "n0", "targetNodeId": "n0s", "condition": "on_success" },
+    { "id": "c6", "sourceNodeId": "n0q", "targetNodeId": "n3", "condition": "on_success" },
+    { "id": "c7", "sourceNodeId": "n3", "targetNodeId": "n4", "condition": "on_success" },
+    { "id": "c8", "sourceNodeId": "n2", "targetNodeId": "n2a", "condition": "on_success" },
+    { "id": "c9", "sourceNodeId": "n4", "targetNodeId": "n5", "condition": "on_success" },
+    { "id": "c10", "sourceNodeId": "n2a", "targetNodeId": "n5", "condition": "on_success" },
+    { "id": "c11", "sourceNodeId": "n0s", "targetNodeId": "n5", "condition": "on_success" },
+    { "id": "c12", "sourceNodeId": "n0c", "targetNodeId": "n5", "condition": "on_success" },
+    { "id": "c13", "sourceNodeId": "n0s", "targetNodeId": "n_msg", "condition": "on_success" },
+    { "id": "c14", "sourceNodeId": "n2a", "targetNodeId": "n_msg", "condition": "on_success" },
+    { "id": "c15", "sourceNodeId": "n_msg", "targetNodeId": "n5", "condition": "on_success" }
+  ]
+}
