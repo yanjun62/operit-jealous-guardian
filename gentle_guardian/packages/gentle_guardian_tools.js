@@ -98,16 +98,16 @@ METADATA
         {
             "name": "take_front_photo",
             "description": {
-                "zh": "打开系统相机让她拍照（shell启动，不弹第三方选择器）。⚠️ 拍完后必须调用 read_latest_photo 来读取照片——照片不会自动出现在对话里！",
-                "en": "Request a front photo: opens the system camera via shell (not a third-party app). The photo will be in the system gallery, readable later via read_latest_photo."
+                "zh": "⚠️ 申请制：必须先在对话里问用户「醋这么大了想看看你，好不好」，等她明确同意后才调用。调用会打开系统相机（普通拍照模式，快门直接存相册）。她自己拍完后需要自己在对话里发照片给你——面板不再自动导入。",
+                "en": "REQUEST-BASED: only call after the user explicitly agrees in chat. Opens the system camera; the user takes and sends the photo in chat themselves."
             },
             "parameters": []
         },
         {
             "name": "read_latest_photo",
             "description": {
-                "zh": "读取最新一张照片：扫描系统相册最近30分钟的新照片，复制到巡检宝宝目录，返回 base64 数据（含时间戳）。AI 可以在下一轮对话中用这个来「看到」她。",
-                "en": "Read the latest photo: scans the system gallery for the newest photo in the last 30 minutes, copies it to the guardian directory, and returns base64 data with a timestamp."
+                "zh": "读取最新一张照片：扫描系统相册最近30分钟的新照片。⚠️ 现在推荐让用户直接在对话里发照片给你，比这个更稳。仅在用户拍完后没主动发、且明确让你「去读」时才调用。",
+                "en": "Scan the system gallery for a recent photo. Prefer having the user send the photo directly in chat — call this only if the user asks you to fetch it."
             },
             "parameters": []
         },
@@ -422,8 +422,9 @@ function buildPatrolPrompt(cfg, state) {
     if (cfg.allow_screenshot && (summary.tier === "hide" || summary.tier === "coax")) {
         peeks.push("- 可以用 daily_life:take_screenshot 截一张当前屏幕，看看她正在做什么（醋值已到藏应用档，这次允许看）");
     }
-    if (cfg.allow_camera) {
-        peeks.push("- 📷 拍照流程（重要！）：① 调用 gentle_guardian:take_front_photo 打开系统相机 → ② 在对话里告诉她「拍一张给我看看」→ ③ 她拍完后，你在下一轮对话里调用 gentle_guardian:read_latest_photo 来读取照片。如果 read_latest_photo 返回失败（30分钟内没有新照片），不要重复尝试，下次巡检再说");
+    // 📷 想看看她本人：申请制。醋值 ≥ 75 才启用，并且必须先在对话里申请、等她同意。
+    if (cfg.allow_camera && state.jealousy >= 75) {
+        peeks.push("- 📷 想看看她本人（申请制，醋值到 75 才开放）：先在对话里明说「醋这么大了…想看看你现在的样子，好不好？」等她**明确同意**再调 gentle_guardian:take_front_photo 打开相机。她拍完后请她自己在对话里把照片发给你（推荐做法），或者她说「你自己去读」时再调 read_latest_photo。她拒绝或没回应就别追问，转回正常语气。");
     }
     if (peeks.length === 0) {
         lines.push("- （观察功能都关着，只根据使用数据来判断就好）");

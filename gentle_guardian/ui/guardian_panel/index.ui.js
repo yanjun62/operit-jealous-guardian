@@ -346,77 +346,17 @@ panelController.addJavascriptInterface("Guardian", {
             return "{}";
         }
     },
-    // 🐱 角色卡头像绑定：先按角色卡名去 Operit 目录里匹配备份（同名图片或带头像字段的角色卡 JSON），
-    // 找不到再翻 avatars 目录取最新的一张。返回 {base64, source} 或 "{}"。
+    // 🐱 头像：只读用户手动上传的（存在插件目录 avatar.json）。
+    // 之前尝试过按角色卡名自动匹配 Operit 备份/avatars 目录，实测拿不到——现在放弃自动，纯手动。
     loadAvatar: async function (cardName) {
         try {
-            // 0) 用户手动设置的头像最优先（点面板头像选的图，存在插件目录）
-            try {
-                var manualRaw = await readFileSafe(BASE_DIR + "avatar.json");
-                if (manualRaw) {
-                    var manual = JSON.parse(manualRaw);
-                    if (manual && manual.base64) {
-                        return JSON.stringify({ base64: manual.base64, source: "manual" });
-                    }
-                }
-            } catch (e) { /* 没设置过就继续往下找 */ }
-            var name = ("" + (cardName || "")).trim().replace(/['"\\$`;|&<>]/g, "");
-            // 0.5) 自动匹配的缓存：找到过一次就存下来，之后开面板直接用，不再全盘 find（性能关键）
-            try {
-                var cacheRaw = await readFileSafe(BASE_DIR + "avatar_cache.json");
-                if (cacheRaw) {
-                    var cache = JSON.parse(cacheRaw);
-                    if (cache && cache.base64 && cache.card === name) {
-                        return JSON.stringify({ base64: cache.base64, source: cache.source || "cache" });
-                    }
-                }
-            } catch (e) { /* 缓存坏了/角色卡换了就重新找 */ }
-            var IMG_EXPR = "\\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \\)";
-            var SEARCH_ROOTS = "/sdcard/Download/Operit /sdcard/Operit /sdcard/Android/data/com.ai.assistance.operit/files";
-            var AVATAR_DIRS = "/sdcard/Download/Operit/avatars " + BASE_DIR + "avatars";
-            var found = "";
-            if (name) {
-                // 1) 备份匹配：Operit 相关目录下文件名带角色卡名的图片
-                var r1 = await execShell("find " + SEARCH_ROOTS + " -maxdepth 5 -iname '*" + name + "*' " + IMG_EXPR + " 2>/dev/null | head -1");
-                if (r1.success && r1.output) found = r1.output.trim().split("\n")[0].trim();
-                // 2) 备份可能是带头像字段的角色卡 JSON 导出
-                if (!found) {
-                    var r2 = await execShell("find " + SEARCH_ROOTS + " -maxdepth 5 -iname '*" + name + "*.json' 2>/dev/null | head -1");
-                    var jsonPath = (r2.success && r2.output) ? r2.output.trim().split("\n")[0].trim() : "";
-                    if (jsonPath && jsonPath.charAt(0) === "/") {
-                        try {
-                            var card = JSON.parse(await readFileSafe(jsonPath));
-                            var b64field = card && (card.avatar_base64 || card.avatar || (card.data && card.data.avatar));
-                            if (typeof b64field === "string" && b64field.length > 100) {
-                                var comma = b64field.indexOf(",");
-                                if (comma > -1) b64field = b64field.slice(comma + 1);
-                                var jb64 = b64field.replace(/\s/g, "");
-                                try { await Tools.Files.write(BASE_DIR + "avatar_cache.json", JSON.stringify({ card: name, base64: jb64, source: jsonPath })); } catch (e) {}
-                                return JSON.stringify({ base64: jb64, source: jsonPath });
-                            }
-                        } catch (e) { /* 备份不是能读的 JSON，继续往下找 */ }
-                    }
-                }
+            var raw = await readFileSafe(BASE_DIR + "avatar.json");
+            if (raw) {
+                var m = JSON.parse(raw);
+                if (m && m.base64) return JSON.stringify({ base64: m.base64, source: "manual" });
             }
-            // 3) 兜底：avatars 目录里最新的一张图
-            if (!found) {
-                var r3 = await execShell("find " + AVATAR_DIRS + " -maxdepth 2 -type f " + IMG_EXPR + " 2>/dev/null | xargs ls -t 2>/dev/null | head -1");
-                if (r3.success && r3.output) found = r3.output.trim().split("\n")[0].trim();
-            }
-            if (!found || found.charAt(0) !== "/") return "{}";
-            var b64 = await execShell("base64 -w0 '" + found.replace(/'/g, "") + "'");
-            if (b64.success && b64.output) {
-                var data = b64.output.replace(/\s/g, "");
-                // 只接受长得像 base64 的输出，防止 shell 返回结构体被误当图片
-                if (data && /^[A-Za-z0-9+/=]+$/.test(data)) {
-                    try { await Tools.Files.write(BASE_DIR + "avatar_cache.json", JSON.stringify({ card: name, base64: data, source: found })); } catch (e) {}
-                    return JSON.stringify({ base64: data, source: found });
-                }
-            }
-            return "{}";
-        } catch (e) {
-            return "{}";
-        }
+        } catch (e) {}
+        return "{}";
     },
     // 📎 上传照片：与 savePhoto 同一落盘格式（photos/latest.jpg 里存 {base64,timestamp} JSON），
     // AI 下轮 read_latest_photo / loadPhoto 就能看到
@@ -621,14 +561,18 @@ function buildPanelHtml() {
     <div class="meter-bar"><div class="meter-fill" id="jbar" style="width:0%"></div></div>
     <div class="meter-marks"><span id="m0">0</span><span id="m1">30</span><span id="m2">60</span><span id="m3">90</span></div>
     <div class="hidden-apps" id="hiddenApps"></div>
-    <div class="bottom-actions">
-      <button class="action-btn" id="cameraBtn" title="拍照给 Ta 看">📷<span class="action-btn-label">拍照</span></button>
-      <button class="action-btn" id="uploadBtn" title="上传照片">📎<span class="action-btn-label">上传</span></button>
-      <button class="action-btn emergency" id="unhideBtn" title="紧急解除">🆘<span class="action-btn-label">紧急解除</span></button>
+    <div style="margin-top:12px">
+      <label style="text-align:left">角色卡名称</label>
+      <input type="text" id="character_card_name" placeholder="和 Operit 里的角色卡完全一致">
     </div>
-    <input type="file" id="fileInput" accept="image/*" style="display:none">
+    <div class="bottom-actions" style="justify-content:center">
+      <button class="action-btn emergency" id="unhideBtn" title="紧急解除全部隐藏，醋值清零" style="max-width:180px">🆘<span class="action-btn-label">紧急解除</span></button>
+    </div>
     <input type="file" id="avatarInput" accept="image/*" style="display:none">
-    <div class="hint" style="margin-top:6px;font-size:10px" id="avatarHint">👋摸摸头像可以哄它 · 点头像可以换头像 · 📷拍照后AI能看到</div>
+    <div class="hint" style="margin-top:8px;font-size:11px;line-height:1.5;color:#a68b7f" id="avatarHint">
+      ⚠️ <b>第一次使用请手动设置</b>：点上方头像上传一张图，并在框里填角色卡名字。<br>
+      （由于技术限制，角色卡头像和名字都没法自动读取到，只能辛苦你手动填一次，之后就一直用它）
+    </div>
   </div>
 
   <div class="card">
@@ -640,8 +584,6 @@ function buildPanelHtml() {
     <h2>基础设置</h2>
     <label>你的名字（AI 怎么称呼你）</label>
     <input type="text" id="user_name" placeholder="宝宝">
-    <label>角色卡名称</label>
-    <input type="text" id="character_card_name" placeholder="必填，和 Operit 里的角色卡完全一致">
     <label>巡检对话标题</label>
     <input type="text" id="chat_query" placeholder="必填，Operit 里巡检对话的标题">
     <div class="hint">巡检消息将发送到这个 Operit 对话</div>
@@ -681,7 +623,8 @@ function buildPanelHtml() {
   <div class="card">
     <h2>观察方式</h2>
     <div class="switch-row"><span>📬 看看最近的通知</span><input type="checkbox" id="allow_notifications"></div>
-    <div class="switch-row"><span>📱 看看当前屏幕在做什么（吃醋到藏应用档以上才会看）</span><input type="checkbox" id="allow_screenshot"></div>
+    <div class="switch-row"><span>📱 偷看一眼当前屏幕（吃醋到藏应用档以上才看）</span><input type="checkbox" id="allow_screenshot"></div>
+    <div class="switch-row"><span>📷 醋值 75 以上申请拍一张看看你（对话里问你同不同意）</span><input type="checkbox" id="allow_camera"></div>
     <label>每次巡检最多观察几次</label>
     <input type="number" id="max_peeks_per_patrol" min="0" max="5">
     <div class="hint">观察只用来组织一句贴心的话，AI 不会复述看到的细节</div>
@@ -812,6 +755,7 @@ function buildPanelHtml() {
     $("coax_max_reduce_per_call").value = cfg.coax_max_reduce_per_call;
     $("allow_notifications").checked = !!cfg.allow_notifications;
     $("allow_screenshot").checked = !!cfg.allow_screenshot;
+    $("allow_camera").checked = !!cfg.allow_camera;
     $("max_peeks_per_patrol").value = cfg.max_peeks_per_patrol;
     $("care_phrases").value = (cfg.care_phrases || []).join("\\n");
     renderPkgNameHints();
@@ -847,7 +791,7 @@ function buildPanelHtml() {
       coax_max_reduce_per_call: parseInt($("coax_max_reduce_per_call").value, 10) || 25,
       allow_notifications: $("allow_notifications").checked,
       allow_screenshot: $("allow_screenshot").checked,
-      allow_camera: !!currentCfg.allow_camera,
+      allow_camera: $("allow_camera").checked,
       max_peeks_per_patrol: parseInt($("max_peeks_per_patrol").value, 10) || 0,
       care_phrases: linesToArr($("care_phrases").value)
     };
@@ -1046,37 +990,6 @@ function buildPanelHtml() {
     avatarInput.value = "";
   });
 
-  // 📎 文件上传
-  var fileInput = $("fileInput");
-  $("uploadBtn").addEventListener("click", function() {
-    fileInput.click();
-  });
-  fileInput.addEventListener("change", async function() {
-    var file = fileInput.files[0];
-    if (!file) return;
-    setStatus("⏳ 上传中...");
-    try {
-      var reader = new FileReader();
-      reader.onload = async function(e) {
-        var b64 = e.target.result;
-        var commaIdx = b64.indexOf(",");
-        if (commaIdx > -1) b64 = b64.slice(commaIdx + 1);
-        var res = JSON.parse(await Guardian.uploadPhoto(b64));
-        if (res.success) {
-          setStatus("📷 上传好啦！AI下次巡检就能看到");
-          $("avatarImg").style.backgroundImage = "url(data:image/jpeg;base64," + b64 + ")";
-          $("avatarImg").textContent = "";
-        } else {
-          setStatus("上传失败：" + (res.message || ""));
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch(e) {
-      setStatus("上传失败：" + e.message);
-    }
-    fileInput.value = "";
-  });
-
   // 每次打开都是全新实例：先通过桥拉一遍数据，别假设上次的状态还在
   async function init() {
     try {
@@ -1101,14 +1014,6 @@ function buildPanelHtml() {
       if (arcRaw) renderArchive(JSON.parse(arcRaw));
     } catch (e) { /* 没有归档就算了 */ }
     await loadAvatar();
-    // 兜底补扫：去相机拍照回来面板可能被重建、轮询断了——开面板时静默扫一次，
-    // 有没导入的新照片就补上（unchanged=true 表示最新照片早就导过，不打扰）
-    try {
-      var scanRes = JSON.parse(await Guardian.scanLatestPhoto());
-      if (scanRes.success && !scanRes.unchanged) {
-        setStatus("📷 发现刚拍的新照片，已自动导入 (" + (scanRes.kb || "?") + " KB)");
-      }
-    } catch (e) { /* 没有就算了 */ }
   }
 
   $("save").addEventListener("click", async function () {
@@ -1151,43 +1056,6 @@ function buildPanelHtml() {
       renderJealousyLog(state);
     } catch (e) {
       setStatus("解除失败：" + e.message);
-    }
-  });
-
-  // 📷 拍照：打开系统相机（普通拍照模式，快门直接存相册）→ 每8秒扫一次相册自动导入。
-  // 去了相机再回来面板可能被重建、轮询会断——所以 init() 里还有一次兜底补扫。
-  $("cameraBtn").addEventListener("click", async function () {
-    setStatus("📷 正在打开相机…");
-    try {
-      var res = JSON.parse(await Guardian.openCamera());
-      if (!res.success) {
-        setStatus("打开相机失败：" + (res.message || ""));
-        return;
-      }
-      setStatus("📷 拍吧！拍完我自动导入；如果回来没导上，再点一次📷就好");
-      var attempts = 0;
-      var timer = setInterval(async function () {
-        attempts++;
-        try {
-          var scanRes = JSON.parse(await Guardian.scanLatestPhoto());
-          if (scanRes.success && !scanRes.unchanged) {
-            clearInterval(timer);
-            setStatus("✅ 导入成功！(" + (scanRes.kb || "?") + " KB) AI下次巡检就能看到");
-          } else if (attempts >= 6) {
-            clearInterval(timer);
-            setStatus("还没扫到新照片～拍好后再点一次 📷，或用 📎 直接上传");
-          } else {
-            setStatus("🔍 等照片保存中…(" + attempts + "/6)");
-          }
-        } catch (e) {
-          if (attempts >= 6) {
-            clearInterval(timer);
-            setStatus("扫描失败：" + e.message);
-          }
-        }
-      }, 8000);
-    } catch (e) {
-      setStatus("失败：" + e.message);
     }
   });
 
