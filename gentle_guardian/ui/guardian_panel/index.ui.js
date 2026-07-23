@@ -319,17 +319,28 @@ panelController.addJavascriptInterface("Guardian", {
     // 找不到再翻 avatars 目录取最新的一张。返回 {base64, source} 或 "{}"。
     loadAvatar: async function (cardName) {
         try {
+            // 0) 用户手动设置的头像最优先（点面板头像选的图，存在插件目录）
+            try {
+                var manualRaw = await readFileSafe(BASE_DIR + "avatar.json");
+                if (manualRaw) {
+                    var manual = JSON.parse(manualRaw);
+                    if (manual && manual.base64) {
+                        return JSON.stringify({ base64: manual.base64, source: "manual" });
+                    }
+                }
+            } catch (e) { /* 没设置过就继续往下找 */ }
             var name = ("" + (cardName || "")).trim().replace(/['"\\$`;|&<>]/g, "");
             var IMG_EXPR = "\\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \\)";
+            var SEARCH_ROOTS = "/sdcard/Download/Operit /sdcard/Operit /sdcard/Android/data/com.ai.assistance.operit/files";
             var AVATAR_DIRS = "/sdcard/Download/Operit/avatars " + BASE_DIR + "avatars";
             var found = "";
             if (name) {
-                // 1) 备份匹配：Operit 目录下文件名带角色卡名的图片
-                var r1 = await execShell("find /sdcard/Download/Operit -maxdepth 4 -iname '*" + name + "*' " + IMG_EXPR + " 2>/dev/null | head -1");
+                // 1) 备份匹配：Operit 相关目录下文件名带角色卡名的图片
+                var r1 = await execShell("find " + SEARCH_ROOTS + " -maxdepth 5 -iname '*" + name + "*' " + IMG_EXPR + " 2>/dev/null | head -1");
                 if (r1.success && r1.output) found = r1.output.trim().split("\n")[0].trim();
                 // 2) 备份可能是带头像字段的角色卡 JSON 导出
                 if (!found) {
-                    var r2 = await execShell("find /sdcard/Download/Operit -maxdepth 4 -iname '*" + name + "*.json' 2>/dev/null | head -1");
+                    var r2 = await execShell("find " + SEARCH_ROOTS + " -maxdepth 5 -iname '*" + name + "*.json' 2>/dev/null | head -1");
                     var jsonPath = (r2.success && r2.output) ? r2.output.trim().split("\n")[0].trim() : "";
                     if (jsonPath && jsonPath.charAt(0) === "/") {
                         try {
@@ -378,6 +389,44 @@ panelController.addJavascriptInterface("Guardian", {
                 timestamp: localTime()
             }));
             return JSON.stringify({ success: true, path: photoPath });
+        } catch (e) {
+            return JSON.stringify({ success: false, message: "" + e.message });
+        }
+    },
+    // 🐱 手动设置头像：存到插件目录，loadAvatar 最优先读它（自动匹配抓不到时的兜底）
+    saveAvatar: async function (base64) {
+        try {
+            var data = "" + (base64 || "");
+            var commaIdx = data.indexOf(",");
+            if (commaIdx > -1) data = data.slice(commaIdx + 1);
+            if (!data) return JSON.stringify({ success: false, message: "空图片" });
+            await Tools.Files.write(BASE_DIR + "avatar.json", JSON.stringify({
+                base64: data,
+                timestamp: localTime()
+            }));
+            return JSON.stringify({ success: true });
+        } catch (e) {
+            return JSON.stringify({ success: false, message: "" + e.message });
+        }
+    },
+    // ⭐ 取消收藏：把归档里第 index 条移回主日志最前面
+    restoreArchive: async function (index) {
+        try {
+            var ARCHIVE_PATH = BASE_DIR + "patrol_log_archive.json";
+            var archive = JSON.parse(await readFileSafe(ARCHIVE_PATH) || "[]");
+            if (!Array.isArray(archive)) archive = [];
+            var idx = parseInt(index);
+            if (isNaN(idx) || idx < 0 || idx >= archive.length) {
+                return JSON.stringify({ success: false, message: "索引不对" });
+            }
+            var entry = archive[idx];
+            archive.splice(idx, 1);
+            await Tools.Files.write(ARCHIVE_PATH, JSON.stringify(archive, null, 2));
+            var log = JSON.parse(await readFileSafe(LOG_PATH) || "[]");
+            if (!Array.isArray(log)) log = [];
+            log.unshift(entry);
+            await Tools.Files.write(LOG_PATH, JSON.stringify(log, null, 2));
+            return JSON.stringify({ success: true, message: "已移回日志" });
         } catch (e) {
             return JSON.stringify({ success: false, message: "" + e.message });
         }
@@ -441,6 +490,27 @@ function buildPanelHtml() {
   .delta-up { color: #d95f4e; font-weight: 600; }
   .delta-down { color: #7ba86f; font-weight: 600; }
   .empty { font-size: 12px; color: #c0aca3; text-align: center; padding: 8px 0; }
+  /* ── 巡检日志：四色状态 tag + 长文本折叠 ── */
+  .log-badge.b-all_good { background: #e9f3e4; color: #5f8f52; }
+  .log-badge.b-cared   { background: #fdeee9; color: #d67d6b; }
+  .log-badge.b-hidden  { background: #fdf0dc; color: #c98a2e; }
+  .log-badge.b-coax    { background: #ffe3de; color: #c9453a; }
+  .log-badge.b-skipped { background: #f0ece9; color: #9a8c84; }
+  .log-text {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .log-item.expanded .log-text { display: block; -webkit-line-clamp: unset; overflow: visible; }
+  .star-btn {
+    float: right; background: none; border: none; font-size: 16px;
+    cursor: pointer; padding: 0 4px; width: auto; margin: 0; color: #d0bdb4;
+  }
+  /* ── 收藏卡片：默认收起，点标题展开 ── */
+  .collapse-header { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  .collapse-header h2 { margin-bottom: 0; }
+  .collapse-arrow { color: #c0aca3; font-size: 12px; }
+  .collapsed-body { display: none; padding-top: 10px; }
+  .collapsed-body.open { display: block; }
   /* ── 吃醋巡检卡片改版 ── */
   .jealousy-card { text-align: center; padding: 18px 14px 12px; }
   .avatar-section { position: relative; display: inline-block; margin-bottom: 10px; }
@@ -513,7 +583,8 @@ function buildPanelHtml() {
       <button class="action-btn emergency" id="unhideBtn" title="紧急解除">🆘<span class="action-btn-label">紧急解除</span></button>
     </div>
     <input type="file" id="fileInput" accept="image/*" style="display:none">
-    <div class="hint" style="margin-top:6px;font-size:10px">👋摸摸头像可以哄它 · 📷拍照后AI能看到</div>
+    <input type="file" id="avatarInput" accept="image/*" style="display:none">
+    <div class="hint" style="margin-top:6px;font-size:10px" id="avatarHint">👋摸摸头像可以哄它 · 点头像可以换头像 · 📷拍照后AI能看到</div>
   </div>
 
   <div class="card">
@@ -586,13 +657,20 @@ function buildPanelHtml() {
   </div>
 
   <div class="card" style="margin-top:12px">
-    <h2>⭐ 收藏的瞬间</h2>
-    <div id="archiveLog"><div class="empty">还没有收藏的记录～在日志里点 ⭐ 就可以收到这里</div></div>
+    <div class="collapse-header" id="archiveHeader">
+      <h2>⭐ 收藏的瞬间 <span id="archiveCount" style="font-weight:400;color:#c0aca3"></span></h2>
+      <span class="collapse-arrow" id="archiveArrow">▸ 点开看看</span>
+    </div>
+    <div id="archiveBody" class="collapsed-body">
+      <div id="archiveLog"><div class="empty">还没有收藏的记录～在日志里点 ☆ 就可以收到这里</div></div>
+    </div>
   </div>
 
 <script>
   var $ = function (id) { return document.getElementById(id); };
-  var STATUS_LABEL = { all_good: "一切安好", cared: "发了关心", skipped: "跳过" };
+  var STATUS_LABEL = { all_good: "一切安好", cared: "表达关心", hidden: "吃醋隐藏", coax: "生气要哄", skipped: "跳过" };
+  var STATUS_CLASS = { all_good: "b-all_good", cared: "b-cared", hidden: "b-hidden", coax: "b-coax", skipped: "b-skipped" };
+  function badgeClass(s) { return STATUS_CLASS[s] || "b-cared"; }
   var TIER_LABEL = { calm: "温柔", sulky: "小委屈", hide: "吃醋了", coax: "要哄" };
 
   // 包名 → 应用名：面板展示用（变动记录/藏应用/阈值提示）。不在表里的原样显示包名。
@@ -765,41 +843,40 @@ function buildPanelHtml() {
     }).join("");
   }
 
+  // 最近的巡检：只留5条，长文本默认折成2行，点条目展开
   function renderLog(entries) {
     var box = $("log");
     if (!entries || !entries.length) {
       box.innerHTML = '<div class="empty">还没有记录～</div>';
       return;
     }
-    box.innerHTML = entries.slice(0, 10).map(function (e, i) {
+    box.innerHTML = entries.slice(0, 5).map(function (e, i) {
       var t = (e.time || "").replace("T", " ").slice(5, 16);
       var badge = STATUS_LABEL[e.status] || e.status || "";
-      var msg = e.message_sent ? '<div>💌 ' + e.message_sent + '</div>' : '';
-      var archiveBtn = '<button class="archive-star" data-idx="' + i + '" style="float:right;background:none;border:none;font-size:16px;cursor:pointer;padding:0 4px;width:auto;margin:0;">☆</button>';
+      var msg = e.message_sent ? '<div class="log-text">💌 ' + e.message_sent + '</div>' : '';
+      var archiveBtn = '<button class="star-btn archive-star" data-idx="' + i + '" title="收藏这个瞬间">☆</button>';
       return '<div class="log-item"><span class="log-time">' + t + '</span>' +
-             '<span class="log-badge">' + badge + '</span>' + archiveBtn +
-             '<div>' + (e.summary || "") + '</div>' + msg + '</div>';
+             '<span class="log-badge ' + badgeClass(e.status) + '">' + badge + '</span>' + archiveBtn +
+             '<div class="log-text">' + (e.summary || "") + '</div>' + msg + '</div>';
     }).join("");
   }
 
-  // ⭐ 归档按钮点击事件（用事件委托绑在日志容器上）
+  // ⭐ 日志区点击：点星星收藏，点条目本身展开/收起长文本（事件委托）
   var logBox = $("log");
   logBox.addEventListener("click", async function (e) {
     var btn = e.target.closest(".archive-star");
-    if (!btn) return;
+    if (!btn) {
+      var item = e.target.closest(".log-item");
+      if (item) item.classList.toggle("expanded");
+      return;
+    }
     var idx = parseInt(btn.getAttribute("data-idx"));
     if (isNaN(idx)) return;
     btn.textContent = "⏳";
     try {
       var res = JSON.parse(await Guardian.toggleArchive(idx));
       if (res.success) {
-        btn.textContent = "★";
-        btn.style.color = "#e8927c";
-        // 刷新日志和归档
-        var logRaw = await Guardian.loadLog();
-        if (logRaw) renderLog(JSON.parse(logRaw));
-        var arcRaw = await Guardian.loadArchive();
-        if (arcRaw) renderArchive(JSON.parse(arcRaw));
+        await refreshLogs();
       } else {
         btn.textContent = "☆";
       }
@@ -808,22 +885,64 @@ function buildPanelHtml() {
     }
   });
 
-  // ⭐ 显示归档日志
+  // ⭐ 显示收藏（每条带 ★，点 ★ 移回日志）
   function renderArchive(entries) {
-    var box = document.getElementById("archiveLog");
+    var box = $("archiveLog");
     if (!box) return;
-    if (!entries || !entries.length) {
-      box.innerHTML = '<div class="empty">还没有收藏的记录～在日志里点 ⭐ 就可以收到这里</div>';
+    var n = (entries && entries.length) || 0;
+    $("archiveCount").textContent = n ? "(" + n + ")" : "";
+    if (!n) {
+      box.innerHTML = '<div class="empty">还没有收藏的记录～在日志里点 ☆ 就可以收到这里</div>';
       return;
     }
-    box.innerHTML = entries.slice(0, 20).map(function (e) {
+    box.innerHTML = entries.slice(0, 20).map(function (e, i) {
       var t = (e.time || "").replace("T", " ").slice(5, 16);
       var badge = STATUS_LABEL[e.status] || e.status || "";
-      var msg = e.message_sent ? '<div>💌 ' + e.message_sent + '</div>' : '';
+      var msg = e.message_sent ? '<div class="log-text">💌 ' + e.message_sent + '</div>' : '';
+      var unstar = '<button class="star-btn archive-unstar" data-idx="' + i + '" title="取消收藏，移回日志" style="color:#e8927c">★</button>';
       return '<div class="log-item"><span class="log-time">' + t + '</span>' +
-             '<span class="log-badge">' + badge + '</span>' +
-             '<div>' + (e.summary || "") + '</div>' + msg + '</div>';
+             '<span class="log-badge ' + badgeClass(e.status) + '">' + badge + '</span>' + unstar +
+             '<div class="log-text">' + (e.summary || "") + '</div>' + msg + '</div>';
     }).join("");
+  }
+
+  // 收藏卡片：默认收起，点标题展开
+  $("archiveHeader").addEventListener("click", function () {
+    var body = $("archiveBody");
+    var open = body.classList.toggle("open");
+    $("archiveArrow").textContent = open ? "▾ 收起" : "▸ 点开看看";
+  });
+
+  // 收藏区点击：点 ★ 取消收藏，点条目展开长文本
+  $("archiveLog").addEventListener("click", async function (e) {
+    var btn = e.target.closest(".archive-unstar");
+    if (!btn) {
+      var item = e.target.closest(".log-item");
+      if (item) item.classList.toggle("expanded");
+      return;
+    }
+    var idx = parseInt(btn.getAttribute("data-idx"));
+    if (isNaN(idx)) return;
+    btn.textContent = "⏳";
+    try {
+      var res = JSON.parse(await Guardian.restoreArchive(idx));
+      if (res.success) await refreshLogs();
+      else btn.textContent = "★";
+    } catch (err) {
+      btn.textContent = "★";
+    }
+  });
+
+  // 日志 + 收藏一起刷新
+  async function refreshLogs() {
+    try {
+      var logRaw = await Guardian.loadLog();
+      renderLog(logRaw ? JSON.parse(logRaw) : []);
+    } catch (e) {}
+    try {
+      var arcRaw = await Guardian.loadArchive();
+      renderArchive(arcRaw ? JSON.parse(arcRaw) : []);
+    } catch (e) {}
   }
 
   function setStatus(text) {
@@ -833,7 +952,7 @@ function buildPanelHtml() {
 
   var currentCfg = DEFAULTS;
 
-  // 🐱 尝试从角色卡备份加载头像
+  // 🐱 头像：手动设置的优先，其次角色卡备份/avatars 目录，都没有就默认猫咪
   async function loadAvatar() {
     try {
       var avatarData = await Guardian.loadAvatar(currentCfg.character_card_name);
@@ -848,7 +967,40 @@ function buildPanelHtml() {
     } catch (e) { /* 加载不到就用默认 */ }
     $("avatarImg").textContent = "🐱";
     $("avatarImg").style.backgroundImage = "";
+    $("avatarHint").textContent = "没抓到角色卡头像～点头像手动选一张，设置一次就一直用它";
   }
+
+  // 点头像 → 手动选一张图设为固定头像（存到插件目录，之后 loadAvatar 最优先用它）
+  var avatarInput = $("avatarInput");
+  $("avatarImg").addEventListener("click", function () {
+    avatarInput.click();
+  });
+  avatarInput.addEventListener("change", function () {
+    var file = avatarInput.files[0];
+    if (!file) return;
+    setStatus("⏳ 设置头像中...");
+    var reader = new FileReader();
+    reader.onload = async function (e) {
+      var b64 = e.target.result;
+      var commaIdx = b64.indexOf(",");
+      if (commaIdx > -1) b64 = b64.slice(commaIdx + 1);
+      try {
+        var res = JSON.parse(await Guardian.saveAvatar(b64));
+        if (res.success) {
+          $("avatarImg").style.backgroundImage = "url(data:image/png;base64," + b64 + ")";
+          $("avatarImg").textContent = "";
+          $("avatarHint").textContent = "👋摸摸头像可以哄它 · 点头像可以换头像 · 📷拍照后AI能看到";
+          setStatus("🐱 头像设置好啦");
+        } else {
+          setStatus("头像保存失败：" + (res.message || ""));
+        }
+      } catch (err) {
+        setStatus("头像保存失败：" + err.message);
+      }
+    };
+    reader.readAsDataURL(file);
+    avatarInput.value = "";
+  });
 
   // 📎 文件上传
   var fileInput = $("fileInput");

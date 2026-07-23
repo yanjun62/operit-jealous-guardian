@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.gentle_guardian",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": ["Kate", "Ash"],
   "main": "main.js",
   "name": "gentle_guardian",
